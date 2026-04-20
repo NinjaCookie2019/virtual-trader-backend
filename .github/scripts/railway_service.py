@@ -60,7 +60,7 @@ def service_variables() -> dict[str, str]:
     }
 
 
-def status() -> None:
+def service_instance() -> dict[str, object]:
     query = """
     query($environmentId: String!, $serviceId: String!) {
       serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
@@ -74,23 +74,44 @@ def status() -> None:
     }
     """
     data = graphql(query, service_variables())
-    print(json.dumps(data["serviceInstance"], indent=2, sort_keys=True))
+    return data["serviceInstance"]  # type: ignore[return-value]
 
 
-def scale(replicas: int) -> None:
+def status() -> None:
+    print(json.dumps(service_instance(), indent=2, sort_keys=True))
+
+
+def start() -> None:
+    instance = service_instance()
+    if instance.get("activeDeployments"):
+        print("Railway service already has an active deployment.")
+        status()
+        return
+
     mutation = """
-    mutation($environmentId: String!, $serviceId: String!, $replicas: Int!) {
-      serviceInstanceUpdate(
-        environmentId: $environmentId,
-        serviceId: $serviceId,
-        input: { numReplicas: $replicas }
-      )
+    mutation($environmentId: String!, $serviceId: String!) {
+      serviceInstanceRedeploy(environmentId: $environmentId, serviceId: $serviceId)
     }
     """
-    variables = service_variables()
-    variables["replicas"] = replicas
-    graphql(mutation, variables)
-    print(f"Railway service replica target set to {replicas}.")
+    graphql(mutation, service_variables())
+    print("Railway service redeploy requested.")
+    status()
+
+
+def stop() -> None:
+    instance = service_instance()
+    active_deployments = instance.get("activeDeployments") or []
+    if not active_deployments:
+        print("Railway service has no active deployments.")
+        status()
+        return
+
+    mutation = "mutation($id: String!) { deploymentStop(id: $id) }"
+    for deployment in active_deployments:
+        deployment_id = str(deployment["id"])
+        graphql(mutation, {"id": deployment_id})
+        print(f"Railway deployment stopped: {deployment_id}")
+
     status()
 
 
@@ -102,9 +123,9 @@ def main() -> None:
     if action == "status":
         status()
     elif action == "start":
-        scale(1)
+        start()
     else:
-        scale(0)
+        stop()
 
 
 if __name__ == "__main__":
