@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     default_trailing_distance_percent: float = 10.0
     default_auto_close_enabled: bool = True
     default_auto_close_time: str = "15:15"
-    default_reverse_signal_exit_enabled: bool = True
+    default_reverse_signal_exit_enabled: bool = False
     strike_step: int = 50
     option_chain_poll_seconds: float = 3.2
     option_quote_poll_seconds: float = 2.0
