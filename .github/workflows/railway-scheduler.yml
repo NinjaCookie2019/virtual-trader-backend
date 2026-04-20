@@ -26,7 +26,7 @@ env:
   BACKEND_URL: "https://virtual-trader-backend-production.up.railway.app"
   RAILWAY_PROJECT_ID: "9f3a8e80-186b-464d-b46b-2d069b382e0d"
   RAILWAY_SERVICE_ID: "0ca89c43-c5d4-4f38-a411-8d3fc2b52d54"
-  RAILWAY_ENVIRONMENT: "production"
+  RAILWAY_ENVIRONMENT_ID: "4fad0b67-ebc5-4862-acdf-b90109bcf913"
 
 jobs:
   schedule-railway:
@@ -56,36 +56,27 @@ jobs:
       - name: Validate Railway token
         shell: bash
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
             echo "::error::Missing GitHub secret RAILWAY_TOKEN. Add it in repo Settings > Secrets and variables > Actions."
             exit 1
           fi
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-      - name: Link Railway project
+      - name: Railway status before action
         shell: bash
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway link \
-            --project "$RAILWAY_PROJECT_ID" \
-            --environment "$RAILWAY_ENVIRONMENT" \
-            --service "$RAILWAY_SERVICE_ID"
+          python .github/scripts/railway_service.py status
 
       - name: Start backend replica
         if: steps.decide.outputs.action == 'start'
         shell: bash
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway scale \
-            --service "$RAILWAY_SERVICE_ID" \
-            --environment "$RAILWAY_ENVIRONMENT" \
-            --us-east4-eqdc4a 1
+          python .github/scripts/railway_service.py start
 
       - name: Warm backend and arm strategy
         if: steps.decide.outputs.action == 'start'
@@ -120,18 +111,15 @@ jobs:
         if: steps.decide.outputs.action == 'stop'
         shell: bash
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway scale \
-            --service "$RAILWAY_SERVICE_ID" \
-            --environment "$RAILWAY_ENVIRONMENT" \
-            --us-east4-eqdc4a 0
+          python .github/scripts/railway_service.py stop
 
       - name: Status
         if: steps.decide.outputs.action == 'status'
         shell: bash
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          railway status
+          python .github/scripts/railway_service.py status
           curl -fsS "$BACKEND_URL/api/state" | python -m json.tool || true
