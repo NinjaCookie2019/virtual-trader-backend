@@ -1,0 +1,324 @@
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import io
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from math import floor
+from typing import Any
+from uuid import uuid4
+
+from dhanhq.dhanhq import dhanhq
+from dhanhq.marketfeed import IDX, Ticker, DhanFeed
+from dhanhq.orderupdate import OrderSocket
+
+from app.core.config import Settings
+
+
+class DhanGatewayError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True)
+class OptionContract:
+    option_type: str
+    strike: int
+    security_id: str
+    exchange_segment: str
+    expiry_date: str
+    last_price: float | None
+    top_bid_price: float | None
+    top_ask_price: float | None
+
+
+class DhanGateway:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.client = None
+        self.option_chain_lock = threading.Lock()
+        self.last_option_chain_request_at = 0.0
+        if self.is_configured:
+            self.client = dhanhq(
+                settings.dhan_client_id,
+                settings.dhan_access_token,
+                disable_ssl=settings.dhan_disable_ssl,
+            )
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.settings.dhan_client_id and self.settings.dhan_access_token)
+
+    def _ensure_client(self) -> dhanhq:
+        if not self.client:
+            raise DhanGatewayError("Dhan credentials are missing. Add them to backend/.env first.")
+        return self.client
+
+    def fetch_previous_day_levels(self) -> tuple[float, float, str]:
+        client = self._ensure_client()
+        today = date.today()
+        from_date = (today - timedelta(days=14)).isoformat()
+        to_date = today.isoformat()
+        response = client.historical_daily_data(
+            security_id=self.settings.underlying_security_id,
+            exchange_segment=self.settings.underlying_exchange_segment,
+            instrument_type=self.settings.underlying_instrument_type,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        data = response.get("data") or {}
+        timestamps = data.get("timestamp") or data.get("start_Time") or []
+        highs = data.get("high") or []
+        lows = data.get("low") or []
+        if not timestamps or not highs or not lows:
+            raise DhanGatewayError(f"Historical data did not include usable candles: {response}")
+
+        candle_date = self._epoch_to_date_string(timestamps[-1])
+        return float(highs[-1]), float(lows[-1]), candle_date
+
+    def fetch_expiry_list(self) -> list[str]:
+        client = self._ensure_client()
+        response = client.expiry_list(
+            under_security_id=int(self.settings.underlying_security_id),
+            under_exchange_segment=self.settings.underlying_exchange_segment,
+        )
+        payload = self._unwrap_data_payload(response, "expiry list")
+        expiries = payload if isinstance(payload, list) else payload.get("data", [])
+        if not expiries:
+            raise DhanGatewayError(f"No expiries returned for {self.settings.underlying_name}: {response}")
+        return sorted(expiries)
+
+    def fetch_option_chain(self, expiry_date: str) -> dict[str, Any]:
+        client = self._ensure_client()
+        with self.option_chain_lock:
+            now = time.monotonic()
+            wait_seconds = self.settings.option_chain_poll_seconds - (now - self.last_option_chain_request_at)
+            if wait_seconds > 0:
+                time.sleep(wait_seconds)
+            response = client.option_chain(
+                under_security_id=int(self.settings.underlying_security_id),
+                under_exchange_segment=self.settings.underlying_exchange_segment,
+                expiry=expiry_date,
+            )
+            self.last_option_chain_request_at = time.monotonic()
+        data = self._unwrap_data_payload(response, "option chain")
+        option_chain = data.get("oc") or {}
+        if not option_chain:
+            raise DhanGatewayError(f"Option chain response did not include strikes: {response}")
+        return data
+
+    def resolve_contract(self, spot_price: float, option_type: str, strike_step: int, expiry_date: str) -> OptionContract:
+        chain = self.fetch_option_chain(expiry_date)
+        strike = self._calculate_otm_strike(spot_price, option_type, strike_step)
+        strike_key = f"{strike:.6f}"
+        strike_row = (chain.get("oc") or {}).get(strike_key)
+        if not strike_row:
+            available = ", ".join(list((chain.get("oc") or {}).keys())[:5])
+            raise DhanGatewayError(
+                f"Strike {strike_key} not found in option chain for {expiry_date}. Sample strikes: {available}"
+            )
+
+        leg = strike_row["ce" if option_type == "CALL" else "pe"]
+        return OptionContract(
+            option_type=option_type,
+            strike=strike,
+            security_id=str(leg["security_id"]),
+            exchange_segment="NSE_FNO",
+            expiry_date=expiry_date,
+            last_price=self._to_float(leg.get("last_price")),
+            top_bid_price=self._to_float(leg.get("top_bid_price")),
+            top_ask_price=self._to_float(leg.get("top_ask_price")),
+        )
+
+    def fetch_security_quote(self, exchange_segment: str, security_id: str) -> dict[str, Any]:
+        client = self._ensure_client()
+        response = client.quote_data({exchange_segment: [int(security_id)]})
+        data = self._unwrap_data_payload(response, "security quote")
+        segment_payload = data.get(exchange_segment) or {}
+        return segment_payload.get(str(security_id)) or next(iter(segment_payload.values()), {})
+
+    def fetch_security_ltp(self, exchange_segment: str, security_id: str) -> float | None:
+        client = self._ensure_client()
+        response = client.ticker_data({exchange_segment: [int(security_id)]})
+        data = self._unwrap_data_payload(response, "security ltp")
+        segment_payload = data.get(exchange_segment) or {}
+        instrument = segment_payload.get(str(security_id)) or next(iter(segment_payload.values()), {})
+        return self._to_float(instrument.get("last_price") or instrument.get("LTP"))
+
+    def place_entry_order(self, contract: OptionContract, quantity: int, product_type: str, tag: str) -> dict[str, Any]:
+        return self._place_limit_order(
+            security_id=contract.security_id,
+            exchange_segment=contract.exchange_segment,
+            transaction_type="BUY",
+            quantity=quantity,
+            product_type=product_type,
+            limit_price=contract.top_ask_price or contract.last_price,
+            tag=tag,
+        )
+
+    def place_exit_order(self, security_id: str, exchange_segment: str, quantity: int, product_type: str, reference_price: float, tag: str) -> dict[str, Any]:
+        return self._place_limit_order(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            transaction_type="SELL",
+            quantity=quantity,
+            product_type=product_type,
+            limit_price=reference_price,
+            tag=tag,
+        )
+
+    def _place_limit_order(
+        self,
+        *,
+        security_id: str,
+        exchange_segment: str,
+        transaction_type: str,
+        quantity: int,
+        product_type: str,
+        limit_price: float | None,
+        tag: str,
+    ) -> dict[str, Any]:
+        client = self._ensure_client()
+        if limit_price is None:
+            raise DhanGatewayError("A limit price could not be resolved for this contract.")
+        response = client.place_order(
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            order_type="LIMIT",
+            product_type=product_type,
+            price=float(limit_price),
+            tag=tag,
+        )
+        return response
+
+    def stream_market_feed(
+        self,
+        stop_event: threading.Event,
+        on_tick: Callable[[dict[str, Any]], None],
+        on_status: Callable[[bool, str | None], None],
+    ) -> None:
+        if not self.is_configured:
+            on_status(False, "Dhan credentials missing.")
+            return
+
+        while not stop_event.is_set():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                feed = DhanFeed(
+                    self.settings.dhan_client_id,
+                    self.settings.dhan_access_token,
+                    [(IDX, self.settings.underlying_security_id, Ticker)],
+                    version="v2",
+                )
+                feed.run_forever()
+                on_status(True, None)
+                while not stop_event.is_set():
+                    packet = feed.get_data()
+                    if packet:
+                        on_tick(packet)
+            except Exception as exc:
+                on_status(False, str(exc))
+                time.sleep(5)
+            finally:
+                on_status(False, None)
+                loop.stop()
+                loop.close()
+
+    def stream_order_updates(
+        self,
+        stop_event: threading.Event,
+        on_update: Callable[[dict[str, Any]], None],
+        on_status: Callable[[bool, str | None], None],
+    ) -> None:
+        if not self.is_configured:
+            on_status(False, "Dhan credentials missing.")
+            return
+
+        socket = OrderSocket(self.settings.dhan_client_id, self.settings.dhan_access_token)
+
+        async def handle(message: dict[str, Any]) -> None:
+            on_update(message)
+
+        socket.handle_order_update = handle  # type: ignore[method-assign]
+        on_status(True, None)
+        while not stop_event.is_set():
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    socket.connect_to_dhan_websocket_sync()
+            except Exception as exc:
+                on_status(False, str(exc))
+                time.sleep(5)
+        on_status(False, None)
+
+    @staticmethod
+    def create_tag(prefix: str) -> str:
+        return f"{prefix}-{uuid4().hex[:12]}"
+
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _epoch_to_date_string(value: Any) -> str:
+        try:
+            epoch = float(value)
+        except (TypeError, ValueError) as exc:
+            raise DhanGatewayError(f"Unexpected timestamp value from historical data: {value}") from exc
+        return datetime.utcfromtimestamp(epoch).date().isoformat()
+
+    @staticmethod
+    def _unwrap_data_payload(response: dict[str, Any], context: str) -> Any:
+        status = response.get("status")
+        if status and str(status).lower() != "success":
+            raise DhanGatewayError(DhanGateway._format_failure_message(response, context))
+
+        payload = response.get("data")
+        while isinstance(payload, dict) and "data" in payload:
+            nested_status = payload.get("status")
+            if nested_status and str(nested_status).lower() not in {"success", "successful"}:
+                raise DhanGatewayError(DhanGateway._format_failure_message(response, context))
+            payload = payload.get("data")
+
+        if payload is None:
+            raise DhanGatewayError(f"Dhan {context} response was empty: {response}")
+        return payload
+
+    @staticmethod
+    def _format_failure_message(response: dict[str, Any], context: str) -> str:
+        remarks = response.get("remarks")
+        if isinstance(remarks, dict):
+            error_message = remarks.get("error_message")
+            if error_message:
+                return f"Dhan {context} request failed: {error_message}"
+
+        payload = response.get("data")
+        while isinstance(payload, dict) and "data" in payload:
+            nested_data = payload.get("data")
+            if isinstance(nested_data, dict) and nested_data:
+                first_key = next(iter(nested_data))
+                first_value = nested_data[first_key]
+                if str(first_key).isdigit() and isinstance(first_value, str):
+                    return f"Dhan {context} request failed ({first_key}): {first_value}"
+            payload = nested_data
+
+        return f"Dhan {context} request failed."
+
+    @staticmethod
+    def _calculate_otm_strike(spot_price: float, option_type: str, strike_step: int) -> int:
+        if option_type == "CALL":
+            return int(floor(spot_price / strike_step) * strike_step + strike_step)
+        rounded_down = int(floor(spot_price / strike_step) * strike_step)
+        if spot_price % strike_step == 0:
+            return rounded_down - strike_step
+        return rounded_down
