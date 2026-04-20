@@ -114,6 +114,8 @@ class StrategyRuntime(BaseModel):
     previous_high_broken: bool = False
     previous_low_broken: bool = False
     session_date: str | None = None
+    market_session_open: bool = False
+    next_trade_window_starts_at: datetime | None = None
 
 
 class StrategySnapshot(BaseModel):

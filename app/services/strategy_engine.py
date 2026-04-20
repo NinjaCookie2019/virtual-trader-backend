@@ -113,6 +113,8 @@ class StrategyEngine:
 
     def get_snapshot(self) -> StrategySnapshot:
         with self.lock:
+            self.runtime.market_session_open = self._is_market_session_open()
+            self.runtime.next_trade_window_starts_at = self._next_trade_window_starts_at()
             return StrategySnapshot(
                 app_name=self.settings.app_name,
                 generated_at=self._now(),
@@ -978,6 +980,19 @@ class StrategyEngine:
             return False
         current_time = local_now.time()
         return dt_time(9, 15) <= current_time <= dt_time(15, 30)
+
+    def _next_trade_window_starts_at(self) -> datetime:
+        timezone_info = ZoneInfo(self.settings.app_timezone)
+        local_now = datetime.now(timezone_info)
+        candidate = datetime.combine(local_now.date(), dt_time(9, 15), tzinfo=timezone_info)
+        if local_now.weekday() < 5 and local_now.time() < dt_time(9, 15):
+            return candidate.astimezone(timezone.utc)
+        days_ahead = 1
+        while True:
+            next_day = local_now.date() + timedelta(days=days_ahead)
+            if next_day.weekday() < 5:
+                return datetime.combine(next_day, dt_time(9, 15), tzinfo=timezone_info).astimezone(timezone.utc)
+            days_ahead += 1
 
     def _is_auto_close_due(self) -> bool:
         if not self.config.auto_close_enabled:
