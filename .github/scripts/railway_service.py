@@ -84,11 +84,15 @@ def status() -> None:
 def start() -> None:
     mutation = """
     mutation($environmentId: String!, $serviceId: String!) {
-      serviceInstanceRedeploy(environmentId: $environmentId, serviceId: $serviceId)
+      serviceInstanceDeploy(
+        environmentId: $environmentId,
+        serviceId: $serviceId,
+        latestCommit: true
+      )
     }
     """
     graphql(mutation, service_variables())
-    print("Railway service redeploy requested.")
+    print("Railway service deploy requested from latest commit.")
     status()
 
 
