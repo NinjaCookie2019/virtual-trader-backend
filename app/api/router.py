@@ -6,7 +6,6 @@ from contextlib import suppress
 
 from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
 
-from app.models.schemas import ActionResponse, ConfigUpdateRequest
 from app.services.strategy_engine import StrategyEngine
 
 
@@ -52,36 +51,6 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
     @router.get("/state")
     def state():
         return engine.get_snapshot()
-
-    @router.post("/control/config")
-    def update_config(payload: ConfigUpdateRequest) -> ActionResponse:
-        snapshot = engine.update_config(payload)
-        return ActionResponse(message="Configuration updated.", snapshot=snapshot)
-
-    @router.post("/control/start")
-    def start() -> ActionResponse:
-        snapshot = engine.start_strategy()
-        return ActionResponse(message="Strategy started.", snapshot=snapshot)
-
-    @router.post("/control/stop")
-    def stop() -> ActionResponse:
-        snapshot = engine.stop_strategy()
-        return ActionResponse(message="Strategy stopped.", snapshot=snapshot)
-
-    @router.post("/control/refresh-levels")
-    def refresh_levels() -> ActionResponse:
-        snapshot = engine.refresh_reference_levels()
-        return ActionResponse(message="Reference levels refreshed.", snapshot=snapshot)
-
-    @router.post("/control/renew-token")
-    def renew_token() -> ActionResponse:
-        snapshot = engine.renew_token_now()
-        return ActionResponse(message="Dhan token renewal check completed.", snapshot=snapshot)
-
-    @router.post("/control/close-position")
-    def close_position() -> ActionResponse:
-        snapshot = engine.close_position()
-        return ActionResponse(message="Close position request processed.", snapshot=snapshot)
 
     @router.websocket("/ws/state")
     async def state_socket(socket: WebSocket) -> None:

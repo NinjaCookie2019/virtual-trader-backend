@@ -78,7 +78,7 @@ jobs:
         run: |
           python .github/scripts/railway_service.py start
 
-      - name: Warm backend and arm strategy
+      - name: Warm backend and read state
         if: steps.decide.outputs.action == 'start'
         shell: bash
         run: |
@@ -97,15 +97,7 @@ jobs:
             sleep 10
           done
 
-          curl -fsS -X POST "$BACKEND_URL/api/control/refresh-levels" > /dev/null
-          curl -fsS -X POST "$BACKEND_URL/api/control/start" > /dev/null
           curl -fsS "$BACKEND_URL/api/state" | python -m json.tool
-
-      - name: Stop strategy before shutdown
-        if: steps.decide.outputs.action == 'stop'
-        shell: bash
-        run: |
-          curl -fsS -X POST "$BACKEND_URL/api/control/stop" > /dev/null || true
 
       - name: Stop backend replica
         if: steps.decide.outputs.action == 'stop'
