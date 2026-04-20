@@ -1,0 +1,137 @@
+name: Railway Trading Scheduler
+
+on:
+  schedule:
+    # 09:00 IST, Monday-Friday. Starts Railway before market open.
+    - cron: "30 3 * * 1-5"
+    # 15:40 IST, Monday-Friday. Stops Railway after auto-close and market close.
+    - cron: "10 10 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Railway backend action"
+        required: true
+        default: "status"
+        type: choice
+        options:
+          - start
+          - stop
+          - status
+
+concurrency:
+  group: railway-trading-scheduler
+  cancel-in-progress: false
+
+env:
+  BACKEND_URL: "https://virtual-trader-backend-production.up.railway.app"
+  RAILWAY_PROJECT_ID: "9f3a8e80-186b-464d-b46b-2d069b382e0d"
+  RAILWAY_SERVICE_ID: "0ca89c43-c5d4-4f38-a411-8d3fc2b52d54"
+  RAILWAY_ENVIRONMENT: "production"
+
+jobs:
+  schedule-railway:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decide scheduler action
+        id: decide
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ACTION="${{ inputs.action }}"
+          elif [ "${{ github.event.schedule }}" = "30 3 * * 1-5" ]; then
+            ACTION="start"
+          elif [ "${{ github.event.schedule }}" = "10 10 * * 1-5" ]; then
+            ACTION="stop"
+          else
+            ACTION="status"
+          fi
+
+          echo "action=$ACTION" >> "$GITHUB_OUTPUT"
+          echo "Scheduler action: $ACTION"
+
+      - name: Validate Railway token
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+            echo "::error::Missing GitHub secret RAILWAY_TOKEN. Add it in repo Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Link Railway project
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway link \
+            --project "$RAILWAY_PROJECT_ID" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --service "$RAILWAY_SERVICE_ID"
+
+      - name: Start backend replica
+        if: steps.decide.outputs.action == 'start'
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway scale \
+            --service "$RAILWAY_SERVICE_ID" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --us-east4-eqdc4a 1
+
+      - name: Warm backend and arm strategy
+        if: steps.decide.outputs.action == 'start'
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            if curl -fsS "$BACKEND_URL/api/health" > /dev/null; then
+              echo "Backend health check passed."
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              echo "::error::Backend did not become healthy after 5 minutes."
+              exit 1
+            fi
+
+            echo "Waiting for backend to boot... attempt $attempt/30"
+            sleep 10
+          done
+
+          curl -fsS -X POST "$BACKEND_URL/api/control/refresh-levels" > /dev/null
+          curl -fsS -X POST "$BACKEND_URL/api/control/start" > /dev/null
+          curl -fsS "$BACKEND_URL/api/state" | python -m json.tool
+
+      - name: Stop strategy before shutdown
+        if: steps.decide.outputs.action == 'stop'
+        shell: bash
+        run: |
+          curl -fsS -X POST "$BACKEND_URL/api/control/stop" > /dev/null || true
+
+      - name: Stop backend replica
+        if: steps.decide.outputs.action == 'stop'
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway scale \
+            --service "$RAILWAY_SERVICE_ID" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --us-east4-eqdc4a 0
+
+      - name: Status
+        if: steps.decide.outputs.action == 'status'
+        shell: bash
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway status
+          curl -fsS "$BACKEND_URL/api/state" | python -m json.tool || true
