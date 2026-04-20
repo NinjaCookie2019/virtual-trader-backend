@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 from app.models.schemas import ActivityEvent, PositionState, StrategyConfig
@@ -71,3 +72,34 @@ class RuntimeStateStore:
             float(migrated.get("current_price", 0)) - float(migrated.get("entry_price", 0))
         ) * int(migrated["quantity"])
         return migrated
+
+
+class DhanTokenStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def load(self) -> dict | None:
+        if not self.path.exists():
+            return None
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict) or not payload.get("access_token"):
+            return None
+        return payload
+
+    def save(
+        self,
+        *,
+        access_token: str,
+        token_valid_until: datetime | None,
+        renewed_at: datetime,
+    ) -> None:
+        payload = {
+            "access_token": access_token,
+            "token_valid_until": token_valid_until.isoformat() if token_valid_until else None,
+            "renewed_at": renewed_at.isoformat(),
+        }
+        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

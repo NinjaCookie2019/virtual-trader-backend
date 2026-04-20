@@ -7,11 +7,13 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from math import floor
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
+import httpx
 from dhanhq.dhanhq import dhanhq
 from dhanhq.marketfeed import IDX, Ticker, DhanFeed
 from dhanhq.orderupdate import OrderSocket
@@ -39,23 +41,88 @@ class DhanGateway:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.client = None
+        self.client_lock = threading.RLock()
         self.option_chain_lock = threading.Lock()
         self.last_option_chain_request_at = 0.0
         if self.is_configured:
-            self.client = dhanhq(
-                settings.dhan_client_id,
-                settings.dhan_access_token,
-                disable_ssl=settings.dhan_disable_ssl,
-            )
+            self.client = self._build_client(settings.dhan_access_token)
 
     @property
     def is_configured(self) -> bool:
         return bool(self.settings.dhan_client_id and self.settings.dhan_access_token)
 
+    def _build_client(self, access_token: str) -> dhanhq:
+        return dhanhq(
+            self.settings.dhan_client_id,
+            access_token,
+            disable_ssl=self.settings.dhan_disable_ssl,
+        )
+
+    def update_access_token(self, access_token: str) -> None:
+        if not access_token.strip():
+            raise DhanGatewayError("Dhan access token cannot be empty.")
+        with self.client_lock:
+            self.settings.dhan_access_token = access_token.strip()
+            self.client = self._build_client(self.settings.dhan_access_token)
+
     def _ensure_client(self) -> dhanhq:
-        if not self.client:
+        with self.client_lock:
+            if not self.client:
+                raise DhanGatewayError("Dhan credentials are missing. Add them to backend/.env first.")
+            return self.client
+
+    def fetch_profile(self) -> dict[str, Any]:
+        if not self.is_configured:
             raise DhanGatewayError("Dhan credentials are missing. Add them to backend/.env first.")
-        return self.client
+        try:
+            response = httpx.get(
+                "https://api.dhan.co/v2/profile",
+                headers={"access-token": self.settings.dhan_access_token},
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise DhanGatewayError(f"Dhan profile request failed: HTTP {exc.response.status_code}") from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise DhanGatewayError(f"Dhan profile request failed: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise DhanGatewayError(f"Dhan profile response was not usable: {payload}")
+        return payload
+
+    def fetch_token_valid_until(self) -> datetime | None:
+        profile = self.fetch_profile()
+        token_validity = profile.get("tokenValidity") or profile.get("token_validity")
+        return self.parse_token_validity(token_validity)
+
+    def renew_access_token(self) -> tuple[str, datetime | None, dict[str, Any]]:
+        if not self.is_configured:
+            raise DhanGatewayError("Dhan credentials are missing. Add them to backend/.env first.")
+        try:
+            response = httpx.get(
+                "https://api.dhan.co/v2/RenewToken",
+                headers={
+                    "access-token": self.settings.dhan_access_token,
+                    "dhanClientId": self.settings.dhan_client_id,
+                },
+                timeout=20.0,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            raise DhanGatewayError(f"Dhan token renewal failed: HTTP {exc.response.status_code}") from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise DhanGatewayError(f"Dhan token renewal failed: {exc}") from exc
+
+        if not isinstance(payload, dict):
+            raise DhanGatewayError(f"Dhan token renewal response was not usable: {payload}")
+
+        new_token = self.extract_access_token(payload)
+        if not new_token:
+            raise DhanGatewayError(f"Dhan token renewal response did not include a new access token: {payload}")
+        token_valid_until = self.extract_token_expiry(payload)
+        self.update_access_token(new_token)
+        return new_token, token_valid_until, payload
 
     def fetch_previous_day_levels(self) -> tuple[float, float, str]:
         client = self._ensure_client()
@@ -259,6 +326,71 @@ class DhanGateway:
     @staticmethod
     def create_tag(prefix: str) -> str:
         return f"{prefix}-{uuid4().hex[:12]}"
+
+    @staticmethod
+    def extract_access_token(payload: dict[str, Any]) -> str | None:
+        candidates: list[Any] = [
+            payload.get("accessToken"),
+            payload.get("access_token"),
+            payload.get("token"),
+        ]
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            candidates.extend([
+                nested.get("accessToken"),
+                nested.get("access_token"),
+                nested.get("token"),
+            ])
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
+
+    @staticmethod
+    def extract_token_expiry(payload: dict[str, Any]) -> datetime | None:
+        candidates: list[Any] = [
+            payload.get("expiryTime"),
+            payload.get("tokenValidity"),
+            payload.get("token_validity"),
+        ]
+        nested = payload.get("data")
+        if isinstance(nested, dict):
+            candidates.extend([
+                nested.get("expiryTime"),
+                nested.get("tokenValidity"),
+                nested.get("token_validity"),
+            ])
+        for candidate in candidates:
+            parsed = DhanGateway.parse_token_validity(candidate)
+            if parsed:
+                return parsed
+        return None
+
+    @staticmethod
+    def parse_token_validity(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        raw = value.strip()
+        formats = (
+            "%d/%m/%Y %H:%M",
+            "%d/%m/%Y %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S.%f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+        )
+        for fmt in formats:
+            try:
+                return datetime.strptime(raw, fmt).replace(tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(timezone.utc)
+            except ValueError:
+                continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=ZoneInfo("Asia/Kolkata")).astimezone(timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     @staticmethod
     def _to_float(value: Any) -> float | None:

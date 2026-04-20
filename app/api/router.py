@@ -73,6 +73,11 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
         snapshot = engine.refresh_reference_levels()
         return ActionResponse(message="Reference levels refreshed.", snapshot=snapshot)
 
+    @router.post("/control/renew-token")
+    def renew_token() -> ActionResponse:
+        snapshot = engine.renew_token_now()
+        return ActionResponse(message="Dhan token renewal check completed.", snapshot=snapshot)
+
     @router.post("/control/close-position")
     def close_position() -> ActionResponse:
         snapshot = engine.close_position()
@@ -93,4 +98,3 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
 
 def attach_routes(app: FastAPI, engine: StrategyEngine, broadcaster: StateBroadcaster) -> None:
     app.include_router(build_router(engine, broadcaster))
-

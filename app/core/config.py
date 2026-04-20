@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     dhan_client_id: str = ""
     dhan_access_token: str = ""
     dhan_disable_ssl: bool = False
+    dhan_auto_renew_enabled: bool = True
+    dhan_token_state_path: Path = Field(default=Path("app/storage/dhan_token.json"))
+    dhan_token_check_seconds: float = 1800.0
+    dhan_token_renew_buffer_minutes: float = 90.0
 
     underlying_name: str = "NIFTY 50"
     underlying_security_id: str = "13"
@@ -59,4 +63,6 @@ def get_settings() -> Settings:
     settings = Settings()
     if not settings.runtime_state_path.is_absolute():
         settings.runtime_state_path = Path(__file__).resolve().parents[2] / settings.runtime_state_path
+    if not settings.dhan_token_state_path.is_absolute():
+        settings.dhan_token_state_path = Path(__file__).resolve().parents[2] / settings.dhan_token_state_path
     return settings

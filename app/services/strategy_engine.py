@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from datetime import date, datetime, time as dt_time, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -21,7 +21,7 @@ from app.models.schemas import (
     StrategySnapshot,
 )
 from app.services.dhan_gateway import DhanGateway, DhanGatewayError, OptionContract
-from app.services.persistence import RuntimeStateStore
+from app.services.persistence import DhanTokenStore, RuntimeStateStore
 
 
 class StrategyEngine:
@@ -29,6 +29,7 @@ class StrategyEngine:
         self.settings = settings
         self.gateway = DhanGateway(settings)
         self.store = RuntimeStateStore(settings.runtime_state_path)
+        self.token_store = DhanTokenStore(settings.dhan_token_state_path)
         self.lock = threading.RLock()
         self.notifier: Callable[[StrategySnapshot], None] | None = None
 
@@ -55,7 +56,17 @@ class StrategyEngine:
             auto_close_time=settings.default_auto_close_time,
             reverse_signal_exit_enabled=settings.default_reverse_signal_exit_enabled,
         ))
-        self.connections = ConnectionState(configured=self.gateway.is_configured)
+        saved_token = self.token_store.load()
+        saved_token_expiry = self._parse_saved_token_expiry(saved_token)
+        if saved_token and saved_token.get("access_token"):
+            self.gateway.update_access_token(str(saved_token["access_token"]))
+
+        self.connections = ConnectionState(
+            configured=self.gateway.is_configured,
+            token_auto_renew_enabled=settings.dhan_auto_renew_enabled,
+            token_valid_until=saved_token_expiry,
+            token_renewal_status="idle",
+        )
         self.reference_levels = ReferenceLevels()
         self.runtime = StrategyRuntime(
             session_date=date.today().isoformat(),
@@ -69,6 +80,8 @@ class StrategyEngine:
         self.order_updates_stop = threading.Event()
         self.position_poller_thread: threading.Thread | None = None
         self.position_poller_stop = threading.Event()
+        self.token_renewal_thread: threading.Thread | None = None
+        self.token_renewal_stop = threading.Event()
 
     def set_notifier(self, notifier: Callable[[StrategySnapshot], None]) -> None:
         self.notifier = notifier
@@ -85,12 +98,14 @@ class StrategyEngine:
             return
 
         self.connections.api_ready = True
+        self._start_token_renewal()
         self.refresh_reference_levels()
         self._start_market_feed()
         self._start_order_updates()
         self._start_position_poller()
 
     def shutdown(self) -> None:
+        self.token_renewal_stop.set()
         self.market_feed_stop.set()
         self.order_updates_stop.set()
         self.position_poller_stop.set()
@@ -181,6 +196,10 @@ class StrategyEngine:
         )
         return self.get_snapshot()
 
+    def renew_token_now(self) -> StrategySnapshot:
+        self._check_and_renew_token(force=True)
+        return self.get_snapshot()
+
     def handle_market_tick(self, packet: dict[str, object]) -> None:
         ltp = self._extract_spot_ltp(packet)
         if ltp is None:
@@ -214,6 +233,7 @@ class StrategyEngine:
             self.connections.market_feed_connected = connected
             if error:
                 self.connections.last_error = error
+                self._mark_token_error_if_auth_related(error)
                 self._log("error", "Market Feed", error)
             self._persist_and_emit()
 
@@ -222,6 +242,7 @@ class StrategyEngine:
             self.connections.order_updates_connected = connected
             if error:
                 self.connections.last_error = error
+                self._mark_token_error_if_auth_related(error)
                 self._log("error", "Order Updates", error)
             self._persist_and_emit()
 
@@ -551,6 +572,145 @@ class StrategyEngine:
 
         self.position_poller_thread = threading.Thread(target=worker, daemon=True, name="position-poller")
         self.position_poller_thread.start()
+
+    def _start_token_renewal(self) -> None:
+        if not self.settings.dhan_auto_renew_enabled:
+            with self.lock:
+                self.connections.token_auto_renew_enabled = False
+                self.connections.token_renewal_status = "idle"
+            return
+        if self.token_renewal_thread and self.token_renewal_thread.is_alive():
+            return
+
+        def worker() -> None:
+            self._check_and_renew_token(force=False)
+            while not self.token_renewal_stop.wait(max(self.settings.dhan_token_check_seconds, 60.0)):
+                self._check_and_renew_token(force=False)
+
+        self.token_renewal_stop.clear()
+        self.token_renewal_thread = threading.Thread(target=worker, daemon=True, name="token-renewal")
+        self.token_renewal_thread.start()
+
+    def _check_and_renew_token(self, *, force: bool) -> None:
+        if not self.gateway.is_configured:
+            with self.lock:
+                self.connections.configured = False
+                self.connections.api_ready = False
+                self.connections.token_renewal_status = "error"
+                self.connections.last_error = "Dhan credentials missing in backend/.env."
+                self._persist_and_emit()
+            return
+
+        now = self._now()
+        try:
+            token_valid_until = self.gateway.fetch_token_valid_until()
+        except DhanGatewayError as exc:
+            with self.lock:
+                self.connections.token_last_checked_at = now
+                self.connections.token_renewal_status = "error"
+                self.connections.last_error = str(exc)
+                self._mark_token_error_if_auth_related(str(exc))
+                self._log("error", "Token Check Failed", str(exc))
+                self._persist_and_emit()
+            return
+
+        should_renew = force
+        if token_valid_until:
+            renew_at = token_valid_until - timedelta(minutes=max(self.settings.dhan_token_renew_buffer_minutes, 5.0))
+            should_renew = should_renew or now >= renew_at
+
+        with self.lock:
+            self.connections.configured = True
+            self.connections.api_ready = True
+            self.connections.token_auto_renew_enabled = self.settings.dhan_auto_renew_enabled
+            self.connections.token_last_checked_at = now
+            self.connections.token_valid_until = token_valid_until
+            if token_valid_until and token_valid_until <= now:
+                self.connections.token_renewal_status = "expired"
+                self.connections.last_error = "Dhan token is expired. It cannot be renewed automatically after expiry."
+                self._log("error", "Token Expired", self.connections.last_error)
+                self._persist_and_emit()
+                return
+            self.connections.token_renewal_status = "renewing" if should_renew else "valid"
+            self._persist_and_emit()
+
+        if not should_renew:
+            return
+
+        try:
+            new_token, renewed_until, _ = self.gateway.renew_access_token()
+            if renewed_until is None:
+                renewed_until = self.gateway.fetch_token_valid_until()
+            renewed_at = self._now()
+            self.token_store.save(
+                access_token=new_token,
+                token_valid_until=renewed_until,
+                renewed_at=renewed_at,
+            )
+        except DhanGatewayError as exc:
+            with self.lock:
+                self.connections.token_renewal_status = "error"
+                self.connections.last_error = str(exc)
+                self._mark_token_error_if_auth_related(str(exc))
+                self._log("error", "Token Renewal Failed", str(exc))
+                self._persist_and_emit()
+            return
+
+        with self.lock:
+            self.connections.configured = True
+            self.connections.api_ready = True
+            self.connections.token_valid_until = renewed_until
+            self.connections.token_last_renewed_at = renewed_at
+            self.connections.token_last_checked_at = renewed_at
+            self.connections.token_renewal_status = "renewed"
+            self.connections.last_error = None
+            expiry_text = renewed_until.astimezone(ZoneInfo(self.settings.app_timezone)).strftime("%d %b %Y, %I:%M %p") if renewed_until else "unknown"
+            self._log(
+                "info",
+                "Dhan Token Renewed",
+                f"Access token renewed automatically. Valid until {expiry_text}.",
+            )
+            self._persist_and_emit()
+
+        self._restart_dhan_streams()
+
+    def _restart_dhan_streams(self) -> None:
+        self.market_feed_stop.set()
+        self.order_updates_stop.set()
+        if self.market_feed_thread and self.market_feed_thread.is_alive():
+            self.market_feed_thread.join(timeout=2.0)
+        if self.order_updates_thread and self.order_updates_thread.is_alive():
+            self.order_updates_thread.join(timeout=2.0)
+
+        self.market_feed_stop = threading.Event()
+        self.order_updates_stop = threading.Event()
+        with self.lock:
+            self.connections.market_feed_connected = False
+            self.connections.order_updates_connected = False
+            self._emit()
+        self._start_market_feed()
+        self._start_order_updates()
+
+    def _mark_token_error_if_auth_related(self, error: str) -> None:
+        normalized = error.lower()
+        auth_markers = ("401", "expired", "unauthorized", "invalid token", "access token", "dh-901")
+        if any(marker in normalized for marker in auth_markers):
+            self.connections.token_renewal_status = "expired" if "expired" in normalized else "error"
+
+    @staticmethod
+    def _parse_saved_token_expiry(saved_token: dict | None) -> datetime | None:
+        if not saved_token:
+            return None
+        raw_expiry = saved_token.get("token_valid_until")
+        if not isinstance(raw_expiry, str) or not raw_expiry:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw_expiry)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def _to_selected_instrument(self, contract: OptionContract) -> SelectedInstrument:
         return SelectedInstrument(

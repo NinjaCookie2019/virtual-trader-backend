@@ -10,3 +10,4 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 app/storage/runtime_state.json
+app/storage/dhan_token.json

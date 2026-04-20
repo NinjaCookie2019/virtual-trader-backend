@@ -44,6 +44,11 @@ class ConnectionState(BaseModel):
     market_feed_connected: bool = False
     order_updates_connected: bool = False
     last_error: str | None = None
+    token_auto_renew_enabled: bool = False
+    token_valid_until: datetime | None = None
+    token_last_checked_at: datetime | None = None
+    token_last_renewed_at: datetime | None = None
+    token_renewal_status: Literal["idle", "valid", "renewing", "renewed", "expired", "error"] = "idle"
 
 
 class ReferenceLevels(BaseModel):
