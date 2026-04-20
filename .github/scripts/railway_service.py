@@ -82,12 +82,6 @@ def status() -> None:
 
 
 def start() -> None:
-    instance = service_instance()
-    if instance.get("activeDeployments"):
-        print("Railway service already has an active deployment.")
-        status()
-        return
-
     mutation = """
     mutation($environmentId: String!, $serviceId: String!) {
       serviceInstanceRedeploy(environmentId: $environmentId, serviceId: $serviceId)
