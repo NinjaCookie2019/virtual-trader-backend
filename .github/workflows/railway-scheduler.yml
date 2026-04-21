@@ -2,8 +2,9 @@ name: Railway Trading Scheduler
 
 on:
   schedule:
-    # 09:00 IST, Monday-Friday. Starts Railway before market open.
-    - cron: "30 3 * * 1-5"
+    # 08:55-09:20 IST, Monday-Friday. Multiple attempts protect against delayed
+    # or missed GitHub schedule ticks before market open.
+    - cron: "25,30,35,40,45,50 3 * * 1-5"
     # 15:40 IST, Monday-Friday. Stops Railway after auto-close and market close.
     - cron: "10 10 * * 1-5"
   workflow_dispatch:
@@ -42,7 +43,7 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ACTION="${{ inputs.action }}"
-          elif [ "${{ github.event.schedule }}" = "30 3 * * 1-5" ]; then
+          elif [ "${{ github.event.schedule }}" = "25,30,35,40,45,50 3 * * 1-5" ]; then
             ACTION="start"
           elif [ "${{ github.event.schedule }}" = "10 10 * * 1-5" ]; then
             ACTION="stop"
@@ -76,6 +77,11 @@ jobs:
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
+          if curl -fsS --max-time 8 "$BACKEND_URL/api/health" > /dev/null; then
+            echo "Backend is already healthy; skipping Railway deploy."
+            exit 0
+          fi
+
           python .github/scripts/railway_service.py start
 
       - name: Warm backend and read state
