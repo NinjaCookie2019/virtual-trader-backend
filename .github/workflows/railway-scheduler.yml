@@ -2,9 +2,14 @@ name: Railway Trading Scheduler
 
 on:
   schedule:
-    # 08:55-09:20 IST, Monday-Friday. Multiple attempts protect against delayed
-    # or missed GitHub schedule ticks before market open.
-    - cron: "25,30,35,40,45,50 3 * * 1-5"
+    # GitHub schedules use UTC. These explicit ticks are 08:55-09:20 IST,
+    # Monday-Friday. Explicit entries are easier to audit than comma lists.
+    - cron: "25 3 * * 1-5"
+    - cron: "30 3 * * 1-5"
+    - cron: "35 3 * * 1-5"
+    - cron: "40 3 * * 1-5"
+    - cron: "45 3 * * 1-5"
+    - cron: "50 3 * * 1-5"
     # 15:40 IST, Monday-Friday. Stops Railway after auto-close and market close.
     - cron: "10 10 * * 1-5"
   workflow_dispatch:
@@ -43,16 +48,23 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             ACTION="${{ inputs.action }}"
-          elif [ "${{ github.event.schedule }}" = "25,30,35,40,45,50 3 * * 1-5" ]; then
-            ACTION="start"
-          elif [ "${{ github.event.schedule }}" = "10 10 * * 1-5" ]; then
-            ACTION="stop"
           else
-            ACTION="status"
+            IST_MINUTES=$(TZ=Asia/Kolkata date +%H%M)
+            if [ "$IST_MINUTES" -ge 855 ] && [ "$IST_MINUTES" -le 920 ]; then
+              ACTION="start"
+            elif [ "$IST_MINUTES" -ge 1540 ] && [ "$IST_MINUTES" -le 1555 ]; then
+              ACTION="stop"
+            else
+              ACTION="status"
+            fi
           fi
 
           echo "action=$ACTION" >> "$GITHUB_OUTPUT"
           echo "Scheduler action: $ACTION"
+          echo "Event name: ${{ github.event_name }}"
+          echo "Event schedule: ${{ github.event.schedule }}"
+          echo "UTC now: $(date -u '+%Y-%m-%d %H:%M:%S')"
+          echo "IST now: $(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M:%S')"
 
       - name: Validate Railway token
         shell: bash
