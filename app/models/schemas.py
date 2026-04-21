@@ -83,6 +83,11 @@ class PositionState(BaseModel):
     trade_value: float
     expiry_date: str
     entry_price: float
+    entry_reason: str | None = None
+    entry_spot_price: float | None = None
+    entry_trigger_price: float | None = None
+    entry_reference_high: float | None = None
+    entry_reference_low: float | None = None
     current_price: float
     pnl: float
     mode: Literal["paper", "live"]

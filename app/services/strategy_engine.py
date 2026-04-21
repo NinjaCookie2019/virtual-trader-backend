@@ -364,7 +364,7 @@ class StrategyEngine:
         lots, quantity, trade_value = sizing
 
         if self.config.paper_trading:
-            self._open_paper_position(contract, fill_price, lots, quantity, trade_value)
+            self._open_paper_position(contract, fill_price, lots, quantity, trade_value, spot_price)
             return
 
         try:
@@ -391,6 +391,7 @@ class StrategyEngine:
                 trade_value=trade_value,
                 mode="live",
                 order_id=str((response.get("data") or {}).get("orderId") or ""),
+                entry_spot_price=spot_price,
             )
             self.runtime.trades_today += 1
             self.runtime.last_signal = contract.option_type
@@ -412,6 +413,9 @@ class StrategyEngine:
                     "lot_size": self.runtime.open_position.lot_size if self.runtime.open_position else None,
                     "quantity": self.runtime.open_position.quantity if self.runtime.open_position else None,
                     "trade_value": self.runtime.open_position.trade_value if self.runtime.open_position else None,
+                    "entry_reason": self.runtime.open_position.entry_reason if self.runtime.open_position else None,
+                    "entry_spot_price": self.runtime.open_position.entry_spot_price if self.runtime.open_position else None,
+                    "entry_trigger_price": self.runtime.open_position.entry_trigger_price if self.runtime.open_position else None,
                     "stop_loss_price": self.runtime.open_position.stop_loss_price if self.runtime.open_position else None,
                     "target_price": self.runtime.open_position.target_price if self.runtime.open_position else None,
                 },
@@ -425,6 +429,7 @@ class StrategyEngine:
         lots: int,
         quantity: int,
         trade_value: float,
+        spot_price: float,
     ) -> None:
         with self.lock:
             self.runtime.selected_instrument = self._to_selected_instrument(contract)
@@ -436,6 +441,7 @@ class StrategyEngine:
                 trade_value=trade_value,
                 mode="paper",
                 order_id=f"paper-{uuid4().hex[:10]}",
+                entry_spot_price=spot_price,
             )
             self.runtime.trades_today += 1
             self.runtime.last_signal = contract.option_type
@@ -457,6 +463,9 @@ class StrategyEngine:
                     "lot_size": self.runtime.open_position.lot_size if self.runtime.open_position else None,
                     "quantity": self.runtime.open_position.quantity if self.runtime.open_position else None,
                     "trade_value": self.runtime.open_position.trade_value if self.runtime.open_position else None,
+                    "entry_reason": self.runtime.open_position.entry_reason if self.runtime.open_position else None,
+                    "entry_spot_price": self.runtime.open_position.entry_spot_price if self.runtime.open_position else None,
+                    "entry_trigger_price": self.runtime.open_position.entry_trigger_price if self.runtime.open_position else None,
                     "stop_loss_price": self.runtime.open_position.stop_loss_price if self.runtime.open_position else None,
                     "target_price": self.runtime.open_position.target_price if self.runtime.open_position else None,
                 },
@@ -849,7 +858,18 @@ class StrategyEngine:
         trade_value: float,
         mode: str,
         order_id: str,
+        entry_spot_price: float,
     ) -> PositionState:
+        reference_high = self.reference_levels.previous_day_high
+        reference_low = self.reference_levels.previous_day_low
+        breakout_buffer = self.config.breakout_buffer
+        if contract.option_type == "CALL":
+            trigger_price = reference_high + breakout_buffer if reference_high is not None else None
+            entry_reason = "Previous day high breakout"
+        else:
+            trigger_price = reference_low - breakout_buffer if reference_low is not None else None
+            entry_reason = "Previous day low breakdown"
+
         return PositionState(
             trade_id=uuid4().hex,
             side="BUY",
@@ -863,6 +883,11 @@ class StrategyEngine:
             trade_value=trade_value,
             expiry_date=contract.expiry_date,
             entry_price=fill_price,
+            entry_reason=entry_reason,
+            entry_spot_price=entry_spot_price,
+            entry_trigger_price=trigger_price,
+            entry_reference_high=reference_high,
+            entry_reference_low=reference_low,
             current_price=fill_price,
             pnl=0.0,
             mode=mode,  # type: ignore[arg-type]
