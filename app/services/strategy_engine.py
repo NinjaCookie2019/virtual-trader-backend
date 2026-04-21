@@ -16,6 +16,7 @@ from app.models.schemas import (
     PositionState,
     ReferenceLevels,
     SelectedInstrument,
+    OptionChainOiChange,
     StrategyConfig,
     StrategyRuntime,
     StrategySnapshot,
@@ -128,6 +129,26 @@ class StrategyEngine:
                 runtime=self.runtime.model_copy(deep=True),
                 events=[event.model_copy(deep=True) for event in self.events[-100:]],
             )
+
+    def get_option_chain_oi_change(self, strike: int) -> OptionChainOiChange:
+        with self.lock:
+            expiry_date = self.reference_levels.expiry_date
+        if not expiry_date:
+            expiry_date = self.gateway.fetch_expiry_list()[0]
+
+        chain = self.gateway.fetch_option_chain(expiry_date)
+        oi = self.gateway.get_strike_oi_change(chain, strike)
+        return OptionChainOiChange(
+            strike=strike,
+            expiry_date=expiry_date,
+            ce_change_oi=float(oi["ce_change_oi"] or 0),
+            pe_change_oi=float(oi["pe_change_oi"] or 0),
+            ce_last_price=oi["ce_last_price"],
+            pe_last_price=oi["pe_last_price"],
+            ce_oi=oi["ce_oi"],
+            pe_oi=oi["pe_oi"],
+            updated_at=self._now(),
+        )
 
     def update_config(self, payload: ConfigUpdateRequest) -> StrategySnapshot:
         with self.lock:

@@ -259,6 +259,33 @@ class DhanGateway:
             rule=rule,
         )
 
+    def get_strike_oi_change(self, chain: dict[str, Any], strike: int) -> dict[str, float | None]:
+        strike_key = f"{strike:.6f}"
+        strike_row = (chain.get("oc") or {}).get(strike_key)
+        if not strike_row:
+            available = ", ".join(list((chain.get("oc") or {}).keys())[:5])
+            raise DhanGatewayError(
+                f"Strike {strike_key} not found in option chain. Sample strikes: {available}"
+            )
+
+        ce_leg = strike_row.get("ce") or {}
+        pe_leg = strike_row.get("pe") or {}
+        ce_change_oi = self._extract_change_oi(ce_leg)
+        pe_change_oi = self._extract_change_oi(pe_leg)
+        if ce_change_oi is None or pe_change_oi is None:
+            raise DhanGatewayError(
+                f"Change OI data missing at strike {strike}. CE={ce_change_oi}, PE={pe_change_oi}."
+            )
+
+        return {
+            "ce_change_oi": ce_change_oi,
+            "pe_change_oi": pe_change_oi,
+            "ce_last_price": self._to_float(ce_leg.get("last_price")),
+            "pe_last_price": self._to_float(pe_leg.get("last_price")),
+            "ce_oi": self._extract_current_oi(ce_leg),
+            "pe_oi": self._extract_current_oi(pe_leg),
+        }
+
     def fetch_security_quote(self, exchange_segment: str, security_id: str) -> dict[str, Any]:
         client = self._ensure_client()
         response = client.quote_data({exchange_segment: [int(security_id)]})
@@ -500,6 +527,15 @@ class DhanGateway:
         if current_oi is None or previous_oi is None:
             return None
         return current_oi - previous_oi
+
+    @staticmethod
+    def _extract_current_oi(leg: dict[str, Any]) -> float | None:
+        return DhanGateway._to_float(
+            leg.get("oi")
+            or leg.get("open_interest")
+            or leg.get("openInterest")
+            or leg.get("OI")
+        )
 
     @staticmethod
     def _epoch_to_date_string(value: Any) -> str:

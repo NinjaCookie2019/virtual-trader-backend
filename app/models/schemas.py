@@ -60,6 +60,18 @@ class ReferenceLevels(BaseModel):
     updated_at: datetime | None = None
 
 
+class OptionChainOiChange(BaseModel):
+    strike: int
+    expiry_date: str
+    ce_change_oi: float
+    pe_change_oi: float
+    ce_last_price: float | None = None
+    pe_last_price: float | None = None
+    ce_oi: float | None = None
+    pe_oi: float | None = None
+    updated_at: datetime
+
+
 class SelectedInstrument(BaseModel):
     option_type: Literal["CALL", "PUT"]
     strike: int

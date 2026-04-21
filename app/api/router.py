@@ -4,8 +4,9 @@ import asyncio
 import json
 from contextlib import suppress
 
-from fastapi import APIRouter, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 
+from app.services.dhan_gateway import DhanGatewayError
 from app.services.strategy_engine import StrategyEngine
 
 
@@ -51,6 +52,13 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
     @router.get("/state")
     def state():
         return engine.get_snapshot()
+
+    @router.get("/option-chain/oi-change")
+    def option_chain_oi_change(strike: int = Query(..., ge=1)):
+        try:
+            return engine.get_option_chain_oi_change(strike)
+        except DhanGatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @router.websocket("/ws/state")
     async def state_socket(socket: WebSocket) -> None:
