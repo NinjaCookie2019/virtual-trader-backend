@@ -4,9 +4,9 @@ Cloudflare Worker Cron scheduler for the Railway-hosted virtual trader backend.
 
 ## Schedule
 
-Cloudflare cron expressions are UTC and use `1 = Sunday`, so weekdays are `2-6`.
+Cloudflare cron expressions are UTC. This config uses weekday names to avoid numeric day-of-week ambiguity.
 
-- `*/5 * * * 2-6` runs every 5 minutes on weekdays.
+- `*/5 * * * MON-FRI` runs every 5 minutes on weekdays.
 - The Worker sends `start` only during `08:55` to `09:20` IST.
 - The Worker sends `stop` only during `15:40` to `15:55` IST.
 

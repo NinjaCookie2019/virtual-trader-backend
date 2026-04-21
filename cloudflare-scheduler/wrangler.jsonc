@@ -6,7 +6,7 @@
   "workers_dev": false,
   "triggers": {
     "crons": [
-      "*/5 * * * 2-6"
+      "*/5 * * * MON-FRI"
     ]
   },
   "vars": {
