@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     default_max_trades_per_day: int = 2
     default_cooldown_seconds: int = 120
     default_breakout_buffer: float = 0.0
+    default_oi_confirmation_enabled: bool = True
     default_stop_loss_percent: float = 15.0
     default_target_percent: float = 30.0
     default_trailing_stop_enabled: bool = True

@@ -20,7 +20,7 @@ from app.models.schemas import (
     StrategyRuntime,
     StrategySnapshot,
 )
-from app.services.dhan_gateway import DhanGateway, DhanGatewayError, OptionContract
+from app.services.dhan_gateway import DhanGateway, DhanGatewayError, OptionContract, OptionOiSignal
 from app.services.persistence import DhanTokenStore, RuntimeStateStore
 
 
@@ -44,6 +44,7 @@ class StrategyEngine:
             lot_size=settings.default_lot_size,
             product_type=settings.default_product_type,
             strike_step=settings.strike_step,
+            oi_confirmation_enabled=settings.default_oi_confirmation_enabled,
             max_trades_per_day=settings.default_max_trades_per_day,
             cooldown_seconds=settings.default_cooldown_seconds,
             breakout_buffer=settings.default_breakout_buffer,
@@ -347,16 +348,63 @@ class StrategyEngine:
     def _trigger_trade(self, option_type: str, spot_price: float) -> None:
         with self.lock:
             expiry_date = self.reference_levels.expiry_date
+            reference_high = self.reference_levels.previous_day_high
+            reference_low = self.reference_levels.previous_day_low
+            breakout_buffer = self.config.breakout_buffer
+            oi_confirmation_enabled = self.config.oi_confirmation_enabled
+            strike_step = self.config.strike_step
             if not expiry_date:
                 self._log("warn", "Trade Skipped", "Expiry date is not loaded yet.")
                 self._persist_and_emit()
                 return
 
+        trigger_price = (
+            (reference_high + breakout_buffer)
+            if option_type == "CALL" and reference_high is not None
+            else (reference_low - breakout_buffer if reference_low is not None else None)
+        )
+        if trigger_price is None:
+            with self.lock:
+                self._log("warn", "Trade Skipped", "Breakout trigger price is not available.")
+                self._persist_and_emit()
+            return
+
         try:
-            contract = self.gateway.resolve_contract(
+            chain = self.gateway.fetch_option_chain(expiry_date)
+            oi_signal = self.gateway.evaluate_oi_confirmation(
+                chain=chain,
+                option_type=option_type,
+                trigger_price=trigger_price,
+                strike_step=strike_step,
+            ) if oi_confirmation_enabled else None
+            if oi_signal and not oi_signal.confirmed:
+                with self.lock:
+                    self._log(
+                        "warn",
+                        "Trade Skipped",
+                        (
+                            f"OI confirmation failed at strike {oi_signal.strike}: "
+                            f"CE change OI {oi_signal.ce_change_oi:.2f}, "
+                            f"PE change OI {oi_signal.pe_change_oi:.2f}. "
+                            f"Required {oi_signal.rule}."
+                        ),
+                        {
+                            "option_type": option_type,
+                            "spot_price": spot_price,
+                            "trigger_price": trigger_price,
+                            "oi_strike": oi_signal.strike,
+                            "ce_change_oi": oi_signal.ce_change_oi,
+                            "pe_change_oi": oi_signal.pe_change_oi,
+                            "required_rule": oi_signal.rule,
+                        },
+                    )
+                    self._persist_and_emit()
+                return
+            contract = self.gateway.resolve_contract_from_chain(
+                chain=chain,
                 spot_price=spot_price,
                 option_type=option_type,
-                strike_step=self.config.strike_step,
+                strike_step=strike_step,
                 expiry_date=expiry_date,
             )
         except DhanGatewayError as exc:
@@ -373,7 +421,7 @@ class StrategyEngine:
         lots, quantity, trade_value = sizing
 
         if self.config.paper_trading:
-            self._open_paper_position(contract, fill_price, lots, quantity, trade_value, spot_price)
+            self._open_paper_position(contract, fill_price, lots, quantity, trade_value, spot_price, oi_signal)
             return
 
         try:
@@ -401,6 +449,7 @@ class StrategyEngine:
                 mode="live",
                 order_id=str((response.get("data") or {}).get("orderId") or ""),
                 entry_spot_price=spot_price,
+                oi_signal=oi_signal,
             )
             self.runtime.trades_today += 1
             self.runtime.last_signal = contract.option_type
@@ -425,6 +474,10 @@ class StrategyEngine:
                     "entry_reason": self.runtime.open_position.entry_reason if self.runtime.open_position else None,
                     "entry_spot_price": self.runtime.open_position.entry_spot_price if self.runtime.open_position else None,
                     "entry_trigger_price": self.runtime.open_position.entry_trigger_price if self.runtime.open_position else None,
+                    "entry_oi_strike": self.runtime.open_position.entry_oi_strike if self.runtime.open_position else None,
+                    "entry_ce_change_oi": self.runtime.open_position.entry_ce_change_oi if self.runtime.open_position else None,
+                    "entry_pe_change_oi": self.runtime.open_position.entry_pe_change_oi if self.runtime.open_position else None,
+                    "entry_oi_rule": self.runtime.open_position.entry_oi_rule if self.runtime.open_position else None,
                     "stop_loss_price": self.runtime.open_position.stop_loss_price if self.runtime.open_position else None,
                     "target_price": self.runtime.open_position.target_price if self.runtime.open_position else None,
                 },
@@ -439,6 +492,7 @@ class StrategyEngine:
         quantity: int,
         trade_value: float,
         spot_price: float,
+        oi_signal: OptionOiSignal | None,
     ) -> None:
         with self.lock:
             self.runtime.selected_instrument = self._to_selected_instrument(contract)
@@ -451,6 +505,7 @@ class StrategyEngine:
                 mode="paper",
                 order_id=f"paper-{uuid4().hex[:10]}",
                 entry_spot_price=spot_price,
+                oi_signal=oi_signal,
             )
             self.runtime.trades_today += 1
             self.runtime.last_signal = contract.option_type
@@ -475,6 +530,10 @@ class StrategyEngine:
                     "entry_reason": self.runtime.open_position.entry_reason if self.runtime.open_position else None,
                     "entry_spot_price": self.runtime.open_position.entry_spot_price if self.runtime.open_position else None,
                     "entry_trigger_price": self.runtime.open_position.entry_trigger_price if self.runtime.open_position else None,
+                    "entry_oi_strike": self.runtime.open_position.entry_oi_strike if self.runtime.open_position else None,
+                    "entry_ce_change_oi": self.runtime.open_position.entry_ce_change_oi if self.runtime.open_position else None,
+                    "entry_pe_change_oi": self.runtime.open_position.entry_pe_change_oi if self.runtime.open_position else None,
+                    "entry_oi_rule": self.runtime.open_position.entry_oi_rule if self.runtime.open_position else None,
                     "stop_loss_price": self.runtime.open_position.stop_loss_price if self.runtime.open_position else None,
                     "target_price": self.runtime.open_position.target_price if self.runtime.open_position else None,
                 },
@@ -877,6 +936,7 @@ class StrategyEngine:
         mode: str,
         order_id: str,
         entry_spot_price: float,
+        oi_signal: OptionOiSignal | None,
     ) -> PositionState:
         reference_high = self.reference_levels.previous_day_high
         reference_low = self.reference_levels.previous_day_low
@@ -904,6 +964,10 @@ class StrategyEngine:
             entry_reason=entry_reason,
             entry_spot_price=entry_spot_price,
             entry_trigger_price=trigger_price,
+            entry_oi_strike=oi_signal.strike if oi_signal else None,
+            entry_ce_change_oi=oi_signal.ce_change_oi if oi_signal else None,
+            entry_pe_change_oi=oi_signal.pe_change_oi if oi_signal else None,
+            entry_oi_rule=oi_signal.rule if oi_signal else None,
             entry_reference_high=reference_high,
             entry_reference_low=reference_low,
             current_price=fill_price,

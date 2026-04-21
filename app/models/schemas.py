@@ -26,6 +26,7 @@ class StrategyConfig(BaseModel):
     product_type: Literal["INTRADAY", "MARGIN", "CNC"] = "INTRADAY"
     strike_step: int = 50
     breakout_buffer: float = 0.0
+    oi_confirmation_enabled: bool = True
     max_trades_per_day: int = 2
     cooldown_seconds: int = 120
     stop_loss_percent: float = 15.0
@@ -86,6 +87,10 @@ class PositionState(BaseModel):
     entry_reason: str | None = None
     entry_spot_price: float | None = None
     entry_trigger_price: float | None = None
+    entry_oi_strike: int | None = None
+    entry_ce_change_oi: float | None = None
+    entry_pe_change_oi: float | None = None
+    entry_oi_rule: str | None = None
     entry_reference_high: float | None = None
     entry_reference_low: float | None = None
     current_price: float
@@ -146,6 +151,7 @@ class ConfigUpdateRequest(BaseModel):
     product_type: Literal["INTRADAY", "MARGIN", "CNC"] | None = None
     strike_step: int | None = None
     breakout_buffer: float | None = None
+    oi_confirmation_enabled: bool | None = None
     max_trades_per_day: int | None = None
     cooldown_seconds: int | None = None
     stop_loss_percent: float | None = None

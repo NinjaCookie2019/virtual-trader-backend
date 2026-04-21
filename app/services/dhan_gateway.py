@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from math import floor
+from math import ceil, floor
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -35,6 +35,16 @@ class OptionContract:
     last_price: float | None
     top_bid_price: float | None
     top_ask_price: float | None
+
+
+@dataclass(slots=True)
+class OptionOiSignal:
+    option_type: str
+    strike: int
+    ce_change_oi: float
+    pe_change_oi: float
+    confirmed: bool
+    rule: str
 
 
 class DhanGateway:
@@ -179,6 +189,16 @@ class DhanGateway:
 
     def resolve_contract(self, spot_price: float, option_type: str, strike_step: int, expiry_date: str) -> OptionContract:
         chain = self.fetch_option_chain(expiry_date)
+        return self.resolve_contract_from_chain(chain, spot_price, option_type, strike_step, expiry_date)
+
+    def resolve_contract_from_chain(
+        self,
+        chain: dict[str, Any],
+        spot_price: float,
+        option_type: str,
+        strike_step: int,
+        expiry_date: str,
+    ) -> OptionContract:
         strike = self._calculate_otm_strike(spot_price, option_type, strike_step)
         strike_key = f"{strike:.6f}"
         strike_row = (chain.get("oc") or {}).get(strike_key)
@@ -198,6 +218,45 @@ class DhanGateway:
             last_price=self._to_float(leg.get("last_price")),
             top_bid_price=self._to_float(leg.get("top_bid_price")),
             top_ask_price=self._to_float(leg.get("top_ask_price")),
+        )
+
+    def evaluate_oi_confirmation(
+        self,
+        chain: dict[str, Any],
+        option_type: str,
+        trigger_price: float,
+        strike_step: int,
+    ) -> OptionOiSignal:
+        strike = self._calculate_oi_confirmation_strike(trigger_price, option_type, strike_step)
+        strike_key = f"{strike:.6f}"
+        strike_row = (chain.get("oc") or {}).get(strike_key)
+        if not strike_row:
+            available = ", ".join(list((chain.get("oc") or {}).keys())[:5])
+            raise DhanGatewayError(
+                f"OI confirmation strike {strike_key} not found in option chain. Sample strikes: {available}"
+            )
+
+        ce_change_oi = self._extract_change_oi(strike_row.get("ce") or {})
+        pe_change_oi = self._extract_change_oi(strike_row.get("pe") or {})
+        if ce_change_oi is None or pe_change_oi is None:
+            raise DhanGatewayError(
+                f"OI confirmation data missing at strike {strike}. CE change OI={ce_change_oi}, PE change OI={pe_change_oi}."
+            )
+
+        if option_type == "CALL":
+            confirmed = pe_change_oi > ce_change_oi
+            rule = "PE change OI > CE change OI"
+        else:
+            confirmed = ce_change_oi > pe_change_oi
+            rule = "CE change OI > PE change OI"
+
+        return OptionOiSignal(
+            option_type=option_type,
+            strike=strike,
+            ce_change_oi=ce_change_oi,
+            pe_change_oi=pe_change_oi,
+            confirmed=confirmed,
+            rule=rule,
         )
 
     def fetch_security_quote(self, exchange_segment: str, security_id: str) -> dict[str, Any]:
@@ -400,6 +459,47 @@ class DhanGateway:
             return float(value)
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _calculate_oi_confirmation_strike(trigger_price: float, option_type: str, strike_step: int) -> int:
+        if option_type == "CALL":
+            return int(ceil(trigger_price / strike_step) * strike_step)
+        return int(floor(trigger_price / strike_step) * strike_step)
+
+    @staticmethod
+    def _extract_change_oi(leg: dict[str, Any]) -> float | None:
+        direct_keys = (
+            "change_oi",
+            "changeOI",
+            "change_in_oi",
+            "changeInOI",
+            "oi_change",
+            "oiChange",
+            "changeinOpenInterest",
+            "change_in_open_interest",
+        )
+        for key in direct_keys:
+            parsed = DhanGateway._to_float(leg.get(key))
+            if parsed is not None:
+                return parsed
+
+        current_oi = DhanGateway._to_float(
+            leg.get("oi")
+            or leg.get("open_interest")
+            or leg.get("openInterest")
+            or leg.get("OI")
+        )
+        previous_oi = DhanGateway._to_float(
+            leg.get("previous_oi")
+            or leg.get("previousOI")
+            or leg.get("prev_oi")
+            or leg.get("prevOI")
+            or leg.get("previous_open_interest")
+            or leg.get("previousOpenInterest")
+        )
+        if current_oi is None or previous_oi is None:
+            return None
+        return current_oi - previous_oi
 
     @staticmethod
     def _epoch_to_date_string(value: Any) -> str:

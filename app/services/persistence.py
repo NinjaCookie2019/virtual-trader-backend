@@ -43,6 +43,7 @@ class RuntimeStateStore:
         migrated = dict(config)
         legacy_quantity = migrated.pop("quantity", None)
         migrated.setdefault("capital_sizing_enabled", True)
+        migrated.setdefault("oi_confirmation_enabled", True)
         migrated.setdefault("account_capital", 20000.0)
         migrated.setdefault("trade_capital", 10000.0)
         migrated.setdefault("lots", 1)

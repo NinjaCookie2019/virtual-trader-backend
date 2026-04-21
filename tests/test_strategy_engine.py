@@ -95,6 +95,7 @@ def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
         mode="paper",
         order_id="paper-test",
         entry_spot_price=101.0,
+        oi_signal=None,
     )
     trade.status = "CLOSED"
     trade.closed_at = engine._now()
