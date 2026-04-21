@@ -49,6 +49,7 @@ class StrategyEngine:
             max_trades_per_day=settings.default_max_trades_per_day,
             cooldown_seconds=settings.default_cooldown_seconds,
             breakout_buffer=settings.default_breakout_buffer,
+            no_trade_before_time=settings.default_no_trade_before_time,
             stop_loss_percent=settings.default_stop_loss_percent,
             target_percent=settings.default_target_percent,
             trailing_stop_enabled=settings.default_trailing_stop_enabled,
@@ -308,7 +309,7 @@ class StrategyEngine:
 
         if not is_enabled or reference_high is None or reference_low is None or has_open_position:
             return
-        if not self._is_market_session_open():
+        if not self._is_trade_entry_window_open():
             return
         if trades_today >= max_trades_per_day:
             return
@@ -371,7 +372,7 @@ class StrategyEngine:
 
         if not is_enabled or reference_high is None or reference_low is None or has_open_position:
             return
-        if not self._is_market_session_open():
+        if not self._is_trade_entry_window_open():
             return
         if trades_today >= max_trades_per_day:
             return
@@ -1224,17 +1225,32 @@ class StrategyEngine:
         current_time = local_now.time()
         return dt_time(9, 15) <= current_time <= dt_time(15, 30)
 
+    def _no_trade_before_time(self) -> dt_time:
+        try:
+            hours, minutes = self.config.no_trade_before_time.split(":", maxsplit=1)
+            return dt_time(int(hours), int(minutes))
+        except ValueError:
+            return dt_time(9, 20)
+
+    def _is_trade_entry_window_open(self) -> bool:
+        local_now = datetime.now(ZoneInfo(self.settings.app_timezone))
+        if local_now.weekday() >= 5:
+            return False
+        current_time = local_now.time()
+        return self._no_trade_before_time() <= current_time <= dt_time(15, 30)
+
     def _next_trade_window_starts_at(self) -> datetime:
         timezone_info = ZoneInfo(self.settings.app_timezone)
         local_now = datetime.now(timezone_info)
-        candidate = datetime.combine(local_now.date(), dt_time(9, 15), tzinfo=timezone_info)
-        if local_now.weekday() < 5 and local_now.time() < dt_time(9, 15):
+        no_trade_before = self._no_trade_before_time()
+        candidate = datetime.combine(local_now.date(), no_trade_before, tzinfo=timezone_info)
+        if local_now.weekday() < 5 and local_now.time() < no_trade_before:
             return candidate.astimezone(timezone.utc)
         days_ahead = 1
         while True:
             next_day = local_now.date() + timedelta(days=days_ahead)
             if next_day.weekday() < 5:
-                return datetime.combine(next_day, dt_time(9, 15), tzinfo=timezone_info).astimezone(timezone.utc)
+                return datetime.combine(next_day, no_trade_before, tzinfo=timezone_info).astimezone(timezone.utc)
             days_ahead += 1
 
     def _is_auto_close_due(self) -> bool:
@@ -1250,6 +1266,7 @@ class StrategyEngine:
 
     def _normalize_config(self, config: StrategyConfig) -> StrategyConfig:
         normalized = config.model_copy(deep=True)
+        normalized.no_trade_before_time = normalized.no_trade_before_time or self.settings.default_no_trade_before_time
         normalized.stop_loss_percent = min(max(normalized.stop_loss_percent, 5.0), 40.0)
         normalized.target_percent = min(max(normalized.target_percent, 10.0), 100.0)
         normalized.trailing_activation_percent = min(max(normalized.trailing_activation_percent, 5.0), 80.0)

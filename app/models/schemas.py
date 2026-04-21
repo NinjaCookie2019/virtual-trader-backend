@@ -29,6 +29,7 @@ class StrategyConfig(BaseModel):
     oi_confirmation_enabled: bool = True
     max_trades_per_day: int = 2
     cooldown_seconds: int = 120
+    no_trade_before_time: str = "09:20"
     stop_loss_percent: float = 15.0
     target_percent: float = 30.0
     trailing_stop_enabled: bool = True
@@ -166,6 +167,7 @@ class ConfigUpdateRequest(BaseModel):
     oi_confirmation_enabled: bool | None = None
     max_trades_per_day: int | None = None
     cooldown_seconds: int | None = None
+    no_trade_before_time: str | None = None
     stop_loss_percent: float | None = None
     target_percent: float | None = None
     trailing_stop_enabled: bool | None = None
