@@ -1,17 +1,6 @@
 name: Railway Trading Scheduler
 
 on:
-  schedule:
-    # GitHub schedules use UTC. These explicit ticks are 08:55-09:20 IST,
-    # Monday-Friday. Explicit entries are easier to audit than comma lists.
-    - cron: "25 3 * * 1-5"
-    - cron: "30 3 * * 1-5"
-    - cron: "35 3 * * 1-5"
-    - cron: "40 3 * * 1-5"
-    - cron: "45 3 * * 1-5"
-    - cron: "50 3 * * 1-5"
-    # 15:40 IST, Monday-Friday. Stops Railway after auto-close and market close.
-    - cron: "10 10 * * 1-5"
   workflow_dispatch:
     inputs:
       action:

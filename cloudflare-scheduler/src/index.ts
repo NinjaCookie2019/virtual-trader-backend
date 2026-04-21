@@ -1,0 +1,321 @@
+type SchedulerAction = "start" | "stop" | "status";
+
+interface Env {
+  BACKEND_URL: string;
+  GITHUB_OWNER: string;
+  GITHUB_REPO: string;
+  GITHUB_REF: string;
+  GITHUB_WORKFLOW: string;
+  GITHUB_TOKEN?: string;
+  RAILWAY_API_TOKEN?: string;
+  RAILWAY_ENVIRONMENT_ID: string;
+  RAILWAY_SERVICE_ID: string;
+  SCHEDULER_SECRET?: string;
+}
+
+interface SchedulerDecision {
+  action: SchedulerAction;
+  istMinutes: number;
+  istTimestamp: string;
+}
+
+const RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
+
+export default {
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runScheduler(env, determineAction(new Date()), "cron", controller.cron));
+  },
+
+  async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/health") {
+      return jsonResponse({ ok: true, service: "virtual-trader-scheduler" });
+    }
+
+    if (url.pathname !== "/run") {
+      return jsonResponse({ error: "Not found" }, 404);
+    }
+
+    if (request.method !== "POST") {
+      return jsonResponse({ error: "Use POST /run?action=start|stop|status" }, 405);
+    }
+
+    const unauthorized = authorize(request, env);
+    if (unauthorized) {
+      return unauthorized;
+    }
+
+    const requestedAction = url.searchParams.get("action");
+    const decision = requestedAction
+      ? {
+          action: parseAction(requestedAction),
+          istMinutes: getIstMinutes(new Date()),
+          istTimestamp: formatIst(new Date()),
+        }
+      : determineAction(new Date());
+
+    return jsonResponse(await runScheduler(env, decision, "manual"));
+  },
+};
+
+function determineAction(now: Date): SchedulerDecision {
+  const istMinutes = getIstMinutes(now);
+  let action: SchedulerAction = "status";
+
+  if (istMinutes >= 855 && istMinutes <= 920) {
+    action = "start";
+  } else if (istMinutes >= 1540 && istMinutes <= 1555) {
+    action = "stop";
+  }
+
+  return {
+    action,
+    istMinutes,
+    istTimestamp: formatIst(now),
+  };
+}
+
+async function runScheduler(
+  env: Env,
+  decision: SchedulerDecision,
+  source: "cron" | "manual",
+  cron?: string,
+) {
+  const context = {
+    action: decision.action,
+    source,
+    cron: cron ?? null,
+    istTimestamp: decision.istTimestamp,
+    istMinutes: decision.istMinutes,
+  };
+
+  if (decision.action === "status") {
+    if (source === "cron") {
+      return {
+        ...context,
+        backend: null,
+        railway: null,
+        dispatched: false,
+        message: "Outside trading scheduler windows; cron no-op to avoid unnecessary calls.",
+      };
+    }
+
+    return {
+      ...context,
+      backend: await readBackendState(env),
+      railway: env.RAILWAY_API_TOKEN ? await railwayStatus(env) : null,
+      dispatched: false,
+      message: "Outside trading scheduler windows; no start/stop action sent.",
+    };
+  }
+
+  if (decision.action === "start") {
+    const backend = await readBackendState(env);
+    if (backend.healthy) {
+      return {
+        ...context,
+        backend,
+        dispatched: false,
+        message: "Backend already healthy; skipped start action.",
+      };
+    }
+  }
+
+  if (env.RAILWAY_API_TOKEN) {
+    const railway = decision.action === "start" ? await railwayStart(env) : await railwayStop(env);
+    return {
+      ...context,
+      railway,
+      dispatched: false,
+      message: `Railway ${decision.action} requested directly from Cloudflare Worker.`,
+    };
+  }
+
+  await dispatchGithubWorkflow(env, decision.action);
+  return {
+    ...context,
+    dispatched: true,
+    message: `GitHub workflow_dispatch sent with action=${decision.action}.`,
+  };
+}
+
+async function readBackendState(env: Env) {
+  const health = await fetchWithTimeout(`${env.BACKEND_URL}/api/health`, 8000);
+  if (!health.ok) {
+    return {
+      healthy: false,
+      status: health.status,
+      state: null,
+    };
+  }
+
+  const state = await fetchWithTimeout(`${env.BACKEND_URL}/api/state`, 8000);
+  return {
+    healthy: true,
+    status: state.status,
+    state: state.ok ? await state.json().catch(() => null) : null,
+  };
+}
+
+async function dispatchGithubWorkflow(env: Env, action: SchedulerAction) {
+  if (!env.GITHUB_TOKEN) {
+    throw new Error("Missing GITHUB_TOKEN secret or RAILWAY_API_TOKEN secret.");
+  }
+
+  const endpoint = `https://api.github.com/repos/${env.GITHUB_OWNER}/${env.GITHUB_REPO}/actions/workflows/${env.GITHUB_WORKFLOW}/dispatches`;
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Accept: "application/vnd.github+json",
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "virtual-trader-cloudflare-scheduler",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+    body: JSON.stringify({
+      ref: env.GITHUB_REF,
+      inputs: { action },
+    }),
+  });
+
+  if (response.status !== 204) {
+    const body = await response.text();
+    throw new Error(`GitHub dispatch failed: HTTP ${response.status} ${body.slice(0, 500)}`);
+  }
+}
+
+async function railwayStatus(env: Env) {
+  const query = `
+    query($environmentId: String!, $serviceId: String!) {
+      serviceInstance(environmentId: $environmentId, serviceId: $serviceId) {
+        serviceId
+        environmentId
+        numReplicas
+        sleepApplication
+        latestDeployment { id status }
+        activeDeployments { id status }
+      }
+    }
+  `;
+  const data = await railwayGraphql(env, query, railwayVariables(env));
+  return data.serviceInstance;
+}
+
+async function railwayStart(env: Env) {
+  const mutation = `
+    mutation($environmentId: String!, $serviceId: String!) {
+      serviceInstanceDeploy(
+        environmentId: $environmentId,
+        serviceId: $serviceId,
+        latestCommit: true
+      )
+    }
+  `;
+  await railwayGraphql(env, mutation, railwayVariables(env));
+  return railwayStatus(env);
+}
+
+async function railwayStop(env: Env) {
+  const instance = await railwayStatus(env);
+  const activeDeployments = Array.isArray(instance.activeDeployments) ? instance.activeDeployments : [];
+  const mutation = "mutation($id: String!) { deploymentStop(id: $id) }";
+  const stopped: string[] = [];
+
+  for (const deployment of activeDeployments) {
+    if (!deployment?.id) {
+      continue;
+    }
+    await railwayGraphql(env, mutation, { id: String(deployment.id) });
+    stopped.push(String(deployment.id));
+  }
+
+  return {
+    stopped,
+    current: await railwayStatus(env),
+  };
+}
+
+async function railwayGraphql(env: Env, query: string, variables: Record<string, unknown>) {
+  if (!env.RAILWAY_API_TOKEN) {
+    throw new Error("Missing RAILWAY_API_TOKEN secret.");
+  }
+
+  const response = await fetch(RAILWAY_GRAPHQL_ENDPOINT, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RAILWAY_API_TOKEN}`,
+      "Content-Type": "application/json",
+      "User-Agent": "virtual-trader-cloudflare-scheduler/1.0",
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  const payload = await response.json<Record<string, unknown>>();
+  if (!response.ok || payload.errors) {
+    throw new Error(`Railway API failed: HTTP ${response.status} ${JSON.stringify(payload).slice(0, 500)}`);
+  }
+
+  return payload.data as Record<string, any>;
+}
+
+function railwayVariables(env: Env) {
+  return {
+    environmentId: env.RAILWAY_ENVIRONMENT_ID,
+    serviceId: env.RAILWAY_SERVICE_ID,
+  };
+}
+
+function authorize(request: Request, env: Env) {
+  if (!env.SCHEDULER_SECRET) {
+    return null;
+  }
+
+  const expected = `Bearer ${env.SCHEDULER_SECRET}`;
+  if (request.headers.get("Authorization") !== expected) {
+    return jsonResponse({ error: "Unauthorized" }, 401);
+  }
+
+  return null;
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("timeout"), timeoutMs);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function parseAction(value: string): SchedulerAction {
+  if (value === "start" || value === "stop" || value === "status") {
+    return value;
+  }
+
+  throw new Error("Invalid action. Use start, stop, or status.");
+}
+
+function getIstMinutes(date: Date) {
+  const ist = new Date(date.getTime() + 5.5 * 60 * 60 * 1000);
+  return ist.getUTCHours() * 100 + ist.getUTCMinutes();
+}
+
+function formatIst(date: Date) {
+  return new Intl.DateTimeFormat("en-IN", {
+    dateStyle: "medium",
+    timeStyle: "medium",
+    timeZone: "Asia/Kolkata",
+  }).format(date);
+}
+
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}

@@ -9,5 +9,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+cloudflare-scheduler/node_modules/
+cloudflare-scheduler/.dev.vars
 app/storage/runtime_state.json
 app/storage/dhan_token.json

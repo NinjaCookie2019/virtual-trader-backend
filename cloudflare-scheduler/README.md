@@ -1,0 +1,31 @@
+# Virtual Trader Scheduler
+
+Cloudflare Worker Cron scheduler for the Railway-hosted virtual trader backend.
+
+## Schedule
+
+Cloudflare cron expressions are UTC and use `1 = Sunday`, so weekdays are `2-6`.
+
+- `*/5 * * * 2-6` runs every 5 minutes on weekdays.
+- The Worker sends `start` only during `08:55` to `09:20` IST.
+- The Worker sends `stop` only during `15:40` to `15:55` IST.
+
+The Worker checks the actual IST time before sending an action. If Cloudflare fires outside the allowed windows, it returns a no-op and does not call the backend.
+
+## Secrets
+
+Required for current deployment:
+
+- `GITHUB_TOKEN`: GitHub token with `workflow` permission. Used to call the existing `railway-scheduler.yml` workflow with `workflow_dispatch`.
+- `SCHEDULER_SECRET`: Bearer token for manual `POST /run` testing.
+
+Optional future direct mode:
+
+- `RAILWAY_API_TOKEN`: If set, the Worker calls Railway GraphQL directly and skips GitHub dispatch.
+
+## Manual Test
+
+```bash
+curl -X POST "https://virtual-trader-scheduler.<subdomain>.workers.dev/run?action=status" \
+  -H "Authorization: Bearer $SCHEDULER_SECRET"
+```

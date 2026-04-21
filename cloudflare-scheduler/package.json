@@ -1,0 +1,14 @@
+{
+  "name": "virtual-trader-scheduler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "wrangler check",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.84.1"
+  }
+}

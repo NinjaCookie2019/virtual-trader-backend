@@ -1,0 +1,21 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "virtual-trader-scheduler",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-21",
+  "workers_dev": false,
+  "triggers": {
+    "crons": [
+      "*/5 * * * 2-6"
+    ]
+  },
+  "vars": {
+    "BACKEND_URL": "https://virtual-trader-backend-production.up.railway.app",
+    "GITHUB_OWNER": "NinjaCookie2019",
+    "GITHUB_REPO": "virtual-trader-backend",
+    "GITHUB_REF": "main",
+    "GITHUB_WORKFLOW": "railway-scheduler.yml",
+    "RAILWAY_ENVIRONMENT_ID": "4fad0b67-ebc5-4862-acdf-b90109bcf913",
+    "RAILWAY_SERVICE_ID": "0ca89c43-c5d4-4f38-a411-8d3fc2b52d54"
+  }
+}
