@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from app.core.config import Settings
-from app.services.dhan_gateway import OptionContract
+from app.services.dhan_gateway import OptionContract, OptionOiSignal
 from app.services.strategy_engine import StrategyEngine
 
 
@@ -112,3 +112,48 @@ def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
     assert engine.runtime.trades_today == 1
     assert engine.runtime.previous_high_broken is True
     assert triggered == []
+
+
+def test_pending_call_breakout_is_rechecked_while_spot_stays_above_high() -> None:
+    engine = build_engine()
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+    engine.pending_oi_breakouts["CALL"] = OptionOiSignal(
+        option_type="CALL",
+        strike=100,
+        ce_change_oi=50.0,
+        pe_change_oi=45.0,
+        confirmed=False,
+        rule="PE change OI > CE change OI",
+    )
+
+    engine._evaluate_breakout(previous_spot=101.0, spot_price=102.0)
+
+    assert triggered == [("CALL", 102.0)]
+
+
+def test_call_oi_confirmation_allows_trade_when_resistance_decreases() -> None:
+    engine = build_engine()
+    engine.pending_oi_breakouts["CALL"] = OptionOiSignal(
+        option_type="CALL",
+        strike=100,
+        ce_change_oi=50.0,
+        pe_change_oi=45.0,
+        confirmed=False,
+        rule="PE change OI > CE change OI",
+    )
+
+    confirmed = engine._weakening_oi_confirmation(
+        OptionOiSignal(
+            option_type="CALL",
+            strike=100,
+            ce_change_oi=49.0,
+            pe_change_oi=45.0,
+            confirmed=False,
+            rule="PE change OI > CE change OI",
+        )
+    )
+
+    assert confirmed is not None
+    assert confirmed.confirmed is True
+    assert "CE resistance change OI decreasing" in confirmed.rule

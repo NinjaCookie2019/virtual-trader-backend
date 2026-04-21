@@ -85,6 +85,7 @@ class StrategyEngine:
         self.position_poller_stop = threading.Event()
         self.token_renewal_thread: threading.Thread | None = None
         self.token_renewal_stop = threading.Event()
+        self.pending_oi_breakouts: dict[str, OptionOiSignal] = {}
 
     def set_notifier(self, notifier: Callable[[StrategySnapshot], None]) -> None:
         self.notifier = notifier
@@ -272,6 +273,8 @@ class StrategyEngine:
             max_trades_per_day = self.config.max_trades_per_day
             previous_high_broken = self.runtime.previous_high_broken
             previous_low_broken = self.runtime.previous_low_broken
+            has_pending_call_oi = "CALL" in self.pending_oi_breakouts
+            has_pending_put_oi = "PUT" in self.pending_oi_breakouts
 
         if not is_enabled or reference_high is None or reference_low is None or has_open_position:
             return
@@ -288,8 +291,14 @@ class StrategyEngine:
         if previous_spot <= high_trigger < spot_price and not previous_high_broken:
             self._trigger_trade("CALL", spot_price)
             return
+        if spot_price > high_trigger and not previous_high_broken and has_pending_call_oi:
+            self._trigger_trade("CALL", spot_price)
+            return
 
         if previous_spot >= low_trigger > spot_price and not previous_low_broken:
+            self._trigger_trade("PUT", spot_price)
+            return
+        if spot_price < low_trigger and not previous_low_broken and has_pending_put_oi:
             self._trigger_trade("PUT", spot_price)
 
     def _rearm_breakout_flags(self, spot_price: float) -> None:
@@ -307,10 +316,12 @@ class StrategyEngine:
 
             if self.runtime.previous_high_broken and spot_price <= high_trigger:
                 self.runtime.previous_high_broken = False
+                self.pending_oi_breakouts.pop("CALL", None)
                 changed = True
 
             if self.runtime.previous_low_broken and spot_price >= low_trigger:
                 self.runtime.previous_low_broken = False
+                self.pending_oi_breakouts.pop("PUT", None)
                 changed = True
 
             if changed:
@@ -378,28 +389,36 @@ class StrategyEngine:
                 strike_step=strike_step,
             ) if oi_confirmation_enabled else None
             if oi_signal and not oi_signal.confirmed:
+                weakening_signal = self._weakening_oi_confirmation(oi_signal)
+                if weakening_signal:
+                    oi_signal = weakening_signal
+                else:
+                    with self.lock:
+                        self.pending_oi_breakouts[option_type] = oi_signal
+                        self._log(
+                            "warn",
+                            "OI Confirmation Waiting",
+                            (
+                                f"Breakout detected but OI is not clean at strike {oi_signal.strike}: "
+                                f"CE change OI {oi_signal.ce_change_oi:.2f}, "
+                                f"PE change OI {oi_signal.pe_change_oi:.2f}. "
+                                f"Waiting for blocking OI to decrease or for {oi_signal.rule}."
+                            ),
+                            {
+                                "option_type": option_type,
+                                "spot_price": spot_price,
+                                "trigger_price": trigger_price,
+                                "oi_strike": oi_signal.strike,
+                                "ce_change_oi": oi_signal.ce_change_oi,
+                                "pe_change_oi": oi_signal.pe_change_oi,
+                                "required_rule": oi_signal.rule,
+                            },
+                        )
+                        self._persist_and_emit()
+                    return
+            if oi_signal:
                 with self.lock:
-                    self._log(
-                        "warn",
-                        "Trade Skipped",
-                        (
-                            f"OI confirmation failed at strike {oi_signal.strike}: "
-                            f"CE change OI {oi_signal.ce_change_oi:.2f}, "
-                            f"PE change OI {oi_signal.pe_change_oi:.2f}. "
-                            f"Required {oi_signal.rule}."
-                        ),
-                        {
-                            "option_type": option_type,
-                            "spot_price": spot_price,
-                            "trigger_price": trigger_price,
-                            "oi_strike": oi_signal.strike,
-                            "ce_change_oi": oi_signal.ce_change_oi,
-                            "pe_change_oi": oi_signal.pe_change_oi,
-                            "required_rule": oi_signal.rule,
-                        },
-                    )
-                    self._persist_and_emit()
-                return
+                    self.pending_oi_breakouts.pop(option_type, None)
             contract = self.gateway.resolve_contract_from_chain(
                 chain=chain,
                 spot_price=spot_price,
@@ -880,6 +899,40 @@ class StrategyEngine:
     @staticmethod
     def _entry_fill_price(contract: OptionContract) -> float:
         return contract.top_ask_price or contract.last_price or 0.0
+
+    def _weakening_oi_confirmation(self, current: OptionOiSignal) -> OptionOiSignal | None:
+        with self.lock:
+            previous = self.pending_oi_breakouts.get(current.option_type)
+        if not previous or previous.strike != current.strike:
+            return None
+
+        if current.option_type == "CALL" and current.ce_change_oi < previous.ce_change_oi:
+            return OptionOiSignal(
+                option_type=current.option_type,
+                strike=current.strike,
+                ce_change_oi=current.ce_change_oi,
+                pe_change_oi=current.pe_change_oi,
+                confirmed=True,
+                rule=(
+                    "CE resistance change OI decreasing "
+                    f"from {previous.ce_change_oi:.2f} to {current.ce_change_oi:.2f}"
+                ),
+            )
+
+        if current.option_type == "PUT" and current.pe_change_oi < previous.pe_change_oi:
+            return OptionOiSignal(
+                option_type=current.option_type,
+                strike=current.strike,
+                ce_change_oi=current.ce_change_oi,
+                pe_change_oi=current.pe_change_oi,
+                confirmed=True,
+                rule=(
+                    "PE support change OI decreasing "
+                    f"from {previous.pe_change_oi:.2f} to {current.pe_change_oi:.2f}"
+                ),
+            )
+
+        return None
 
     def _calculate_trade_size(self, fill_price: float) -> tuple[int, int, float] | None:
         with self.lock:
