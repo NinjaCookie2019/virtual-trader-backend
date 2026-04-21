@@ -131,24 +131,33 @@ class StrategyEngine:
             )
 
     def get_option_chain_oi_change(self, strike: int) -> OptionChainOiChange:
+        return self.get_option_chain_oi_changes([strike])[0]
+
+    def get_option_chain_oi_changes(self, strikes: list[int]) -> list[OptionChainOiChange]:
         with self.lock:
             expiry_date = self.reference_levels.expiry_date
         if not expiry_date:
             expiry_date = self.gateway.fetch_expiry_list()[0]
 
         chain = self.gateway.fetch_option_chain(expiry_date)
-        oi = self.gateway.get_strike_oi_change(chain, strike)
-        return OptionChainOiChange(
-            strike=strike,
-            expiry_date=expiry_date,
-            ce_change_oi=float(oi["ce_change_oi"] or 0),
-            pe_change_oi=float(oi["pe_change_oi"] or 0),
-            ce_last_price=oi["ce_last_price"],
-            pe_last_price=oi["pe_last_price"],
-            ce_oi=oi["ce_oi"],
-            pe_oi=oi["pe_oi"],
-            updated_at=self._now(),
-        )
+        updated_at = self._now()
+        changes: list[OptionChainOiChange] = []
+        for strike in strikes:
+            oi = self.gateway.get_strike_oi_change(chain, strike)
+            changes.append(
+                OptionChainOiChange(
+                    strike=strike,
+                    expiry_date=expiry_date,
+                    ce_change_oi=float(oi["ce_change_oi"] or 0),
+                    pe_change_oi=float(oi["pe_change_oi"] or 0),
+                    ce_last_price=oi["ce_last_price"],
+                    pe_last_price=oi["pe_last_price"],
+                    ce_oi=oi["ce_oi"],
+                    pe_oi=oi["pe_oi"],
+                    updated_at=updated_at,
+                )
+            )
+        return changes
 
     def update_config(self, payload: ConfigUpdateRequest) -> StrategySnapshot:
         with self.lock:

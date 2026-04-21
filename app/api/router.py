@@ -60,6 +60,18 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
         except DhanGatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    @router.get("/option-chain/oi-changes")
+    def option_chain_oi_changes(strikes: list[int] = Query(..., min_length=1, max_length=4)):
+        unique_strikes = list(dict.fromkeys(strikes))
+        if len(unique_strikes) > 4:
+            raise HTTPException(status_code=400, detail="Track up to 4 strikes at a time.")
+        if any(strike < 1 for strike in unique_strikes):
+            raise HTTPException(status_code=400, detail="Strike must be greater than 0.")
+        try:
+            return engine.get_option_chain_oi_changes(unique_strikes)
+        except DhanGatewayError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
     @router.websocket("/ws/state")
     async def state_socket(socket: WebSocket) -> None:
         await broadcaster.connect(socket)
