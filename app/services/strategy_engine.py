@@ -68,10 +68,12 @@ class StrategyEngine:
             token_renewal_status="idle",
         )
         self.reference_levels = ReferenceLevels()
+        session_date = self._today_session_date()
         self.runtime = StrategyRuntime(
-            session_date=date.today().isoformat(),
+            session_date=session_date,
             trade_history=saved_trades[-100:],
         )
+        self._hydrate_session_state_from_history(session_date)
         self.events = saved_events[-150:]
 
         self.market_feed_thread: threading.Thread | None = None
@@ -165,18 +167,23 @@ class StrategyEngine:
                 return self.get_snapshot()
 
         with self.lock:
+            session_date = self._today_session_date()
+            is_new_session = self.runtime.session_date != session_date
             self.reference_levels.previous_day_high = previous_high
             self.reference_levels.previous_day_low = previous_low
             self.reference_levels.source_date = candle_date
             self.reference_levels.expiry_date = expiries[0]
             self.reference_levels.updated_at = self._now()
             self.connections.last_error = None
-            self.runtime.previous_high_broken = False
-            self.runtime.previous_low_broken = False
-            self.runtime.trades_today = 0
-            self.runtime.last_signal = None
-            self.runtime.last_signal_at = None
-            self.runtime.session_date = date.today().isoformat()
+            if is_new_session:
+                self.runtime.previous_high_broken = False
+                self.runtime.previous_low_broken = False
+                self.runtime.trades_today = 0
+                self.runtime.last_signal = None
+                self.runtime.last_signal_at = None
+                self.runtime.session_date = session_date
+            else:
+                self._hydrate_session_state_from_history(session_date)
             self._log(
                 "info",
                 "Reference Levels Updated",
@@ -187,6 +194,8 @@ class StrategyEngine:
             spot_price = self.runtime.spot_price
             enabled = self.config.enabled
 
+        if spot_price is not None:
+            self._rearm_breakout_flags(spot_price)
         if enabled and spot_price is not None:
             self._evaluate_breakout_from_state(spot_price)
         return self.get_snapshot()
@@ -1036,6 +1045,28 @@ class StrategyEngine:
     @staticmethod
     def _now() -> datetime:
         return datetime.now(timezone.utc)
+
+    def _today_session_date(self) -> str:
+        return datetime.now(ZoneInfo(self.settings.app_timezone)).date().isoformat()
+
+    def _trade_session_date(self, position: PositionState) -> str:
+        opened_at = position.opened_at
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+        return opened_at.astimezone(ZoneInfo(self.settings.app_timezone)).date().isoformat()
+
+    def _hydrate_session_state_from_history(self, session_date: str) -> None:
+        todays_trades = [
+            trade for trade in self.runtime.trade_history
+            if self._trade_session_date(trade) == session_date
+        ]
+        self.runtime.trades_today = len(todays_trades)
+        self.runtime.previous_high_broken = any(trade.option_type == "CALL" for trade in todays_trades)
+        self.runtime.previous_low_broken = any(trade.option_type == "PUT" for trade in todays_trades)
+        if todays_trades:
+            latest_trade = max(todays_trades, key=lambda trade: trade.opened_at)
+            self.runtime.last_signal = latest_trade.option_type
+            self.runtime.last_signal_at = latest_trade.opened_at
 
     def _is_market_session_open(self) -> bool:
         local_now = datetime.now(ZoneInfo(self.settings.app_timezone))
