@@ -217,6 +217,7 @@ class StrategyEngine:
             self.runtime.spot_updated_at = self._now()
 
         self._emit()
+        self._rearm_breakout_flags(ltp)
         if previous_spot is None:
             self._evaluate_breakout_from_state(ltp)
             return
@@ -280,6 +281,30 @@ class StrategyEngine:
 
         if previous_spot >= low_trigger > spot_price and not previous_low_broken:
             self._trigger_trade("PUT", spot_price)
+
+    def _rearm_breakout_flags(self, spot_price: float) -> None:
+        with self.lock:
+            reference_high = self.reference_levels.previous_day_high
+            reference_low = self.reference_levels.previous_day_low
+            breakout_buffer = self.config.breakout_buffer
+
+            if reference_high is None or reference_low is None:
+                return
+
+            high_trigger = reference_high + breakout_buffer
+            low_trigger = reference_low - breakout_buffer
+            changed = False
+
+            if self.runtime.previous_high_broken and spot_price <= high_trigger:
+                self.runtime.previous_high_broken = False
+                changed = True
+
+            if self.runtime.previous_low_broken and spot_price >= low_trigger:
+                self.runtime.previous_low_broken = False
+                changed = True
+
+            if changed:
+                self._persist_and_emit()
 
     def _evaluate_breakout_from_state(self, spot_price: float) -> None:
         with self.lock:
