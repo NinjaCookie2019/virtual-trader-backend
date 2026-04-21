@@ -472,7 +472,14 @@ class StrategyEngine:
             )
             self._persist_and_emit()
 
-    def _mark_position_closed(self, order_id: str | None, exit_price: float, exit_reason: str) -> None:
+    def _mark_position_closed(
+        self,
+        order_id: str | None,
+        exit_price: float,
+        exit_reason: str,
+        exit_reason_detail: str | None = None,
+        exit_trigger_price: float | None = None,
+    ) -> None:
         position = self.runtime.open_position
         if not position:
             return
@@ -482,6 +489,8 @@ class StrategyEngine:
         position.closed_at = self._now()
         position.exit_order_id = order_id
         position.exit_reason = exit_reason
+        position.exit_reason_detail = exit_reason_detail
+        position.exit_trigger_price = exit_trigger_price
         position.exit_requested = False
         self.runtime.trade_history.append(position.model_copy(deep=True))
         self.runtime.trade_history = self.runtime.trade_history[-100:]
@@ -962,6 +971,8 @@ class StrategyEngine:
                     order_id=f"paper-exit-{uuid4().hex[:10]}",
                     exit_price=current_price,
                     exit_reason=reason,
+                    exit_reason_detail=message,
+                    exit_trigger_price=triggered_price,
                 )
                 self._log(
                     "trade",
@@ -1006,6 +1017,8 @@ class StrategyEngine:
                 order_id=order_id,
                 exit_price=reference_price,
                 exit_reason=reason,
+                exit_reason_detail=message,
+                exit_trigger_price=triggered_price,
             )
             self._log(
                 "trade",

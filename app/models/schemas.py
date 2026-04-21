@@ -97,6 +97,8 @@ class PositionState(BaseModel):
     trailing_stop_price: float | None = None
     trailing_armed: bool = False
     exit_reason: str | None = None
+    exit_reason_detail: str | None = None
+    exit_trigger_price: float | None = None
     exit_requested: bool = False
     status: Literal["OPEN", "CLOSED"] = "OPEN"
     opened_at: datetime
