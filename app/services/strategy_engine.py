@@ -1021,6 +1021,8 @@ class StrategyEngine:
         else:
             trigger_price = reference_low - breakout_buffer if reference_low is not None else None
             entry_reason = "Previous day low breakdown"
+        if oi_signal:
+            entry_reason = f"{entry_reason} confirmed by option-chain OI: {oi_signal.rule}"
 
         return PositionState(
             trade_id=uuid4().hex,
