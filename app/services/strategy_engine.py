@@ -60,7 +60,8 @@ class StrategyEngine:
             reverse_signal_exit_enabled=settings.default_reverse_signal_exit_enabled,
         ))
         saved_token = self.token_store.load()
-        saved_token_expiry = self._parse_saved_token_expiry(saved_token)
+        saved_token_expiry = self._parse_saved_token_datetime(saved_token, "token_valid_until")
+        saved_token_renewed_at = self._parse_saved_token_datetime(saved_token, "renewed_at")
         if saved_token and saved_token.get("access_token"):
             self.gateway.update_access_token(str(saved_token["access_token"]))
 
@@ -68,6 +69,7 @@ class StrategyEngine:
             configured=self.gateway.is_configured,
             token_auto_renew_enabled=settings.dhan_auto_renew_enabled,
             token_valid_until=saved_token_expiry,
+            token_last_renewed_at=saved_token_renewed_at,
             token_renewal_status="idle",
         )
         self.reference_levels = ReferenceLevels()
@@ -765,22 +767,20 @@ class StrategyEngine:
             return
 
         now = self._now()
+        token_check_error: str | None = None
         try:
             token_valid_until = self.gateway.fetch_token_valid_until()
         except DhanGatewayError as exc:
-            with self.lock:
-                self.connections.token_last_checked_at = now
-                self.connections.token_renewal_status = "error"
-                self.connections.last_error = str(exc)
-                self._mark_token_error_if_auth_related(str(exc))
-                self._log("error", "Token Check Failed", str(exc))
-                self._persist_and_emit()
-            return
+            token_valid_until = None
+            token_check_error = str(exc)
 
-        should_renew = force
+        should_renew = force or token_check_error is not None
         if token_valid_until:
             renew_at = token_valid_until - timedelta(minutes=max(self.settings.dhan_token_renew_buffer_minutes, 5.0))
             should_renew = should_renew or now >= renew_at
+        elif not should_renew:
+            last_renewed_at = self.connections.token_last_renewed_at
+            should_renew = last_renewed_at is None or now - last_renewed_at >= timedelta(hours=12)
 
         with self.lock:
             self.connections.configured = True
@@ -788,6 +788,20 @@ class StrategyEngine:
             self.connections.token_auto_renew_enabled = self.settings.dhan_auto_renew_enabled
             self.connections.token_last_checked_at = now
             self.connections.token_valid_until = token_valid_until
+            if token_check_error:
+                self.connections.token_renewal_status = "renewing"
+                self.connections.last_error = f"Token check failed; attempting renewal. {token_check_error}"
+                self._log("warn", "Token Check Failed", self.connections.last_error)
+                self._persist_and_emit()
+            elif token_valid_until is None and should_renew:
+                self.connections.token_renewal_status = "renewing"
+                self.connections.last_error = "Dhan did not return token validity; attempting renewal as a safety measure."
+                self._log("warn", "Token Validity Unknown", self.connections.last_error)
+                self._persist_and_emit()
+            elif token_valid_until is None:
+                self.connections.token_renewal_status = "valid"
+                self._persist_and_emit()
+                return
             if token_valid_until and token_valid_until <= now:
                 self.connections.token_renewal_status = "expired"
                 self.connections.last_error = "Dhan token is expired. It cannot be renewed automatically after expiry."
@@ -811,11 +825,14 @@ class StrategyEngine:
                 renewed_at=renewed_at,
             )
         except DhanGatewayError as exc:
+            error_message = str(exc)
+            if token_check_error:
+                error_message = f"{error_message}. Token check failed before renewal: {token_check_error}"
             with self.lock:
                 self.connections.token_renewal_status = "error"
-                self.connections.last_error = str(exc)
-                self._mark_token_error_if_auth_related(str(exc))
-                self._log("error", "Token Renewal Failed", str(exc))
+                self.connections.last_error = error_message
+                self._mark_token_error_if_auth_related(error_message)
+                self._log("error", "Token Renewal Failed", error_message)
                 self._persist_and_emit()
             return
 
@@ -861,14 +878,14 @@ class StrategyEngine:
             self.connections.token_renewal_status = "expired" if "expired" in normalized else "error"
 
     @staticmethod
-    def _parse_saved_token_expiry(saved_token: dict | None) -> datetime | None:
+    def _parse_saved_token_datetime(saved_token: dict | None, key: str) -> datetime | None:
         if not saved_token:
             return None
-        raw_expiry = saved_token.get("token_valid_until")
-        if not isinstance(raw_expiry, str) or not raw_expiry:
+        raw_value = saved_token.get(key)
+        if not isinstance(raw_value, str) or not raw_value:
             return None
         try:
-            parsed = datetime.fromisoformat(raw_expiry)
+            parsed = datetime.fromisoformat(raw_value)
         except ValueError:
             return None
         if parsed.tzinfo is None:

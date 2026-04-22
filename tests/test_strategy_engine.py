@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 
 from app.core.config import Settings
-from app.services.dhan_gateway import OptionContract, OptionOiSignal
+from app.services.dhan_gateway import DhanGatewayError, OptionContract, OptionOiSignal
 from app.services.strategy_engine import StrategyEngine
 
 
@@ -169,3 +169,59 @@ def test_call_oi_confirmation_allows_trade_when_resistance_decreases() -> None:
     assert confirmed is not None
     assert confirmed.confirmed is True
     assert "CE resistance change OI decreasing" in confirmed.rule
+
+
+def test_token_renewal_attempts_renew_when_validity_check_fails() -> None:
+    engine = build_engine()
+    engine.settings.dhan_client_id = "client"
+    engine.settings.dhan_access_token = "old-token"
+    engine.gateway.settings.dhan_client_id = "client"
+    engine.gateway.settings.dhan_access_token = "old-token"
+    engine.gateway.client = object()
+    calls: list[str] = []
+
+    def fail_token_check():
+        calls.append("check")
+        raise DhanGatewayError("Dhan profile request failed: HTTP 401")
+
+    def renew_token():
+        calls.append("renew")
+        return "new-token", None, {"accessToken": "new-token"}
+
+    engine.gateway.fetch_token_valid_until = fail_token_check  # type: ignore[method-assign]
+    engine.gateway.renew_access_token = renew_token  # type: ignore[method-assign]
+    engine._restart_dhan_streams = lambda: None  # type: ignore[method-assign]
+
+    engine._check_and_renew_token(force=False)
+
+    assert calls == ["check", "renew", "check"]
+    assert engine.connections.token_renewal_status == "error"
+    assert "Token check failed before renewal" in (engine.connections.last_error or "")
+
+
+def test_token_renewal_renews_when_validity_is_unknown() -> None:
+    engine = build_engine()
+    engine.settings.dhan_client_id = "client"
+    engine.settings.dhan_access_token = "old-token"
+    engine.gateway.settings.dhan_client_id = "client"
+    engine.gateway.settings.dhan_access_token = "old-token"
+    engine.gateway.client = object()
+    calls: list[str] = []
+
+    def unknown_validity():
+        calls.append("check")
+        return None
+
+    def renew_token():
+        calls.append("renew")
+        return "new-token", engine._now(), {"accessToken": "new-token"}
+
+    engine.gateway.fetch_token_valid_until = unknown_validity  # type: ignore[method-assign]
+    engine.gateway.renew_access_token = renew_token  # type: ignore[method-assign]
+    engine._restart_dhan_streams = lambda: None  # type: ignore[method-assign]
+
+    engine._check_and_renew_token(force=False)
+
+    assert calls == ["check", "renew"]
+    assert engine.connections.token_renewal_status == "renewed"
+    assert engine.connections.last_error is None
