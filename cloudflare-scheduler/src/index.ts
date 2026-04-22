@@ -11,6 +11,8 @@ interface Env {
   RAILWAY_ENVIRONMENT_ID: string;
   RAILWAY_SERVICE_ID: string;
   SCHEDULER_SECRET?: string;
+  FORCE_ACTION?: string;
+  FORCE_ACTION_UNTIL_UTC?: string;
 }
 
 interface SchedulerDecision {
@@ -23,7 +25,11 @@ const RAILWAY_GRAPHQL_ENDPOINT = "https://backboard.railway.com/graphql/v2";
 
 export default {
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(runScheduler(env, determineAction(new Date()), "cron", controller.cron));
+    ctx.waitUntil(
+      runScheduler(env, determineAction(new Date(), env), "cron", controller.cron).then((result) => {
+        console.log(JSON.stringify(result));
+      }),
+    );
   },
 
   async fetch(request: Request, env: Env) {
@@ -53,15 +59,25 @@ export default {
           istMinutes: getIstMinutes(new Date()),
           istTimestamp: formatIst(new Date()),
         }
-      : determineAction(new Date());
+      : determineAction(new Date(), env);
 
     return jsonResponse(await runScheduler(env, decision, "manual"));
   },
 };
 
-function determineAction(now: Date): SchedulerDecision {
+function determineAction(now: Date, env: Env): SchedulerDecision {
   const istMinutes = getIstMinutes(now);
   let action: SchedulerAction = "status";
+  const forceAction = parseOptionalAction(env.FORCE_ACTION);
+  const forceUntil = env.FORCE_ACTION_UNTIL_UTC ? Date.parse(env.FORCE_ACTION_UNTIL_UTC) : Number.NaN;
+
+  if (forceAction && Number.isFinite(forceUntil) && now.getTime() <= forceUntil) {
+    return {
+      action: forceAction,
+      istMinutes,
+      istTimestamp: formatIst(now),
+    };
+  }
 
   if (istMinutes >= 855 && istMinutes <= 920) {
     action = "start";
@@ -141,11 +157,19 @@ async function runScheduler(
 }
 
 async function readBackendState(env: Env) {
-  const health = await fetchWithTimeout(`${env.BACKEND_URL}/api/health`, 8000);
+  const health = await fetchWithTimeout(`${env.BACKEND_URL}/api/health`, 8000).catch((error) => {
+    return {
+      ok: false,
+      status: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  });
+
   if (!health.ok) {
     return {
       healthy: false,
       status: health.status,
+      error: "error" in health ? health.error : null,
       state: null,
     };
   }
@@ -295,6 +319,14 @@ function parseAction(value: string): SchedulerAction {
   }
 
   throw new Error("Invalid action. Use start, stop, or status.");
+}
+
+function parseOptionalAction(value: string | undefined): SchedulerAction | null {
+  if (!value) {
+    return null;
+  }
+
+  return parseAction(value);
 }
 
 function getIstMinutes(date: Date) {
