@@ -491,7 +491,7 @@ class DhanGateway:
     def _calculate_oi_confirmation_strike(trigger_price: float, option_type: str, strike_step: int) -> int:
         if option_type == "CALL":
             return int(ceil(trigger_price / strike_step) * strike_step)
-        return int(floor(trigger_price / strike_step) * strike_step)
+        return int(floor(trigger_price / strike_step) * strike_step) - strike_step
 
     @staticmethod
     def _extract_change_oi(leg: dict[str, Any]) -> float | None:
@@ -586,7 +586,4 @@ class DhanGateway:
     def _calculate_otm_strike(spot_price: float, option_type: str, strike_step: int) -> int:
         if option_type == "CALL":
             return int(floor(spot_price / strike_step) * strike_step + strike_step)
-        rounded_down = int(floor(spot_price / strike_step) * strike_step)
-        if spot_price % strike_step == 0:
-            return rounded_down - strike_step
-        return rounded_down
+        return int(floor(spot_price / strike_step) * strike_step) - strike_step
