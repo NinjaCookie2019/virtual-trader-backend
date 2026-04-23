@@ -103,6 +103,26 @@ def test_gap_down_is_evaluated_when_entry_window_opens() -> None:
     assert triggered == [("PUT", 88.0)]
 
 
+def test_capital_sizing_takes_one_lot_when_trade_budget_is_too_small_but_equity_allows() -> None:
+    engine = build_engine()
+    engine.config.capital_sizing_enabled = True
+    engine.config.account_capital = 20000.0
+    engine.config.trade_capital = 10000.0
+    engine.config.lot_size = 65
+
+    assert engine._calculate_trade_size(224.40) == (1, 65, 14586.0)
+
+
+def test_capital_sizing_skips_when_one_lot_exceeds_account_equity() -> None:
+    engine = build_engine()
+    engine.config.capital_sizing_enabled = True
+    engine.config.account_capital = 12000.0
+    engine.config.trade_capital = 10000.0
+    engine.config.lot_size = 65
+
+    assert engine._calculate_trade_size(224.40) is None
+
+
 def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
     engine = build_engine()
     contract = OptionContract(

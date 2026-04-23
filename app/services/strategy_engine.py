@@ -992,9 +992,11 @@ class StrategyEngine:
     def _calculate_trade_size(self, fill_price: float) -> tuple[int, int, float] | None:
         with self.lock:
             capital_sizing_enabled = self.config.capital_sizing_enabled
+            account_capital = self.config.account_capital
             trade_capital = self.config.trade_capital
             configured_lots = self.config.lots
             lot_size = self.config.lot_size
+            realized_pnl = sum(trade.pnl for trade in self.runtime.trade_history if trade.status == "CLOSED")
 
         if fill_price <= 0:
             with self.lock:
@@ -1009,25 +1011,48 @@ class StrategyEngine:
         lots = configured_lots
         if capital_sizing_enabled:
             one_lot_cost = fill_price * lot_size
-            lots = int(trade_capital // one_lot_cost)
+            account_equity = account_capital + realized_pnl
+            sizing_budget = min(trade_capital, max(account_equity, 0))
+            lots = int(sizing_budget // one_lot_cost)
             if lots < 1:
-                with self.lock:
-                    self._log(
-                        "warn",
-                        "Trade Skipped",
-                        (
-                            f"One lot costs {one_lot_cost:.2f}, which is above the "
-                            f"per-trade budget of {trade_capital:.2f}."
-                        ),
-                        {
-                            "entry_price": fill_price,
-                            "lot_size": lot_size,
-                            "one_lot_cost": one_lot_cost,
-                            "trade_capital": trade_capital,
-                        },
-                    )
-                    self._persist_and_emit()
-                return None
+                if one_lot_cost <= account_equity:
+                    lots = 1
+                    with self.lock:
+                        self._log(
+                            "warn",
+                            "Trade Size Raised",
+                            (
+                                f"Per-trade budget {trade_capital:.2f} could not cover one lot, "
+                                f"so the engine is taking 1 lot using account equity."
+                            ),
+                            {
+                                "entry_price": fill_price,
+                                "lot_size": lot_size,
+                                "one_lot_cost": one_lot_cost,
+                                "trade_capital": trade_capital,
+                                "account_equity": account_equity,
+                            },
+                        )
+                        self._persist_and_emit()
+                else:
+                    with self.lock:
+                        self._log(
+                            "warn",
+                            "Trade Skipped",
+                            (
+                                f"One lot costs {one_lot_cost:.2f}, which is above both the "
+                                f"per-trade budget of {trade_capital:.2f} and account equity of {account_equity:.2f}."
+                            ),
+                            {
+                                "entry_price": fill_price,
+                                "lot_size": lot_size,
+                                "one_lot_cost": one_lot_cost,
+                                "trade_capital": trade_capital,
+                                "account_equity": account_equity,
+                            },
+                        )
+                        self._persist_and_emit()
+                    return None
 
         quantity = lots * lot_size
         trade_value = fill_price * quantity
