@@ -90,6 +90,7 @@ class StrategyEngine:
         self.token_renewal_thread: threading.Thread | None = None
         self.token_renewal_stop = threading.Event()
         self.pending_oi_breakouts: dict[str, OptionOiSignal] = {}
+        self._entry_window_open_on_last_tick = False
 
     def set_notifier(self, notifier: Callable[[StrategySnapshot], None]) -> None:
         self.notifier = notifier
@@ -254,6 +255,9 @@ class StrategyEngine:
         with self.lock:
             previous_spot = self.runtime.spot_price
             has_open_position = self.runtime.open_position is not None and self.runtime.open_position.status == "OPEN"
+            entry_window_open = self._is_trade_entry_window_open()
+            entry_window_just_opened = entry_window_open and not self._entry_window_open_on_last_tick
+            self._entry_window_open_on_last_tick = entry_window_open
 
         with self.lock:
             self.runtime.previous_spot_price = previous_spot
@@ -267,6 +271,9 @@ class StrategyEngine:
             return
         if has_open_position:
             self._evaluate_reverse_signal_exit(previous_spot, ltp)
+            return
+        if entry_window_just_opened:
+            self._evaluate_breakout_from_state(ltp)
             return
         self._evaluate_breakout(previous_spot, ltp)
 

@@ -86,6 +86,23 @@ def test_breakout_does_not_trade_before_configured_entry_time() -> None:
     assert triggered == []
 
 
+def test_gap_down_is_evaluated_when_entry_window_opens() -> None:
+    engine = build_engine()
+    triggered: list[tuple[str, float]] = []
+    entry_window_open = False
+
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+    engine._is_trade_entry_window_open = lambda: entry_window_open  # type: ignore[method-assign]
+
+    engine.handle_market_tick({"LTP": 89.0})
+    assert triggered == []
+
+    entry_window_open = True
+    engine.handle_market_tick({"LTP": 88.0})
+
+    assert triggered == [("PUT", 88.0)]
+
+
 def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
     engine = build_engine()
     contract = OptionContract(
