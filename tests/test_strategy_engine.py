@@ -192,6 +192,43 @@ def test_trade_reset_lock_hydrates_breakout_without_counting_trade() -> None:
     assert triggered == []
 
 
+def test_reset_today_trade_removes_trade_and_locks_side() -> None:
+    engine = build_engine()
+    contract = OptionContract(
+        option_type="PUT",
+        strike=50,
+        security_id="test-put",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=10.0,
+        top_bid_price=9.9,
+        top_ask_price=10.0,
+    )
+    trade = engine._build_position_state(
+        contract=contract,
+        fill_price=10.0,
+        lots=1,
+        quantity=65,
+        trade_value=650.0,
+        mode="paper",
+        order_id="paper-test",
+        entry_spot_price=89.0,
+        oi_signal=None,
+    )
+    trade.status = "CLOSED"
+    trade.closed_at = engine._now()
+    engine.runtime.trade_history.append(trade)
+    engine._log("trade", "Paper Trade Opened", "Bought PUT.")
+    engine._hydrate_session_state_from_history(engine._today_session_date())
+
+    snapshot = engine.reset_today_trade(trade.trade_id)
+
+    assert snapshot.runtime.trades_today == 0
+    assert snapshot.runtime.previous_low_broken is True
+    assert snapshot.runtime.trade_history == []
+    assert snapshot.events[-1].title == "Trade Reset Lock"
+
+
 def test_pending_call_breakout_is_rechecked_while_spot_stays_above_high() -> None:
     engine = build_engine()
     triggered: list[tuple[str, float]] = []

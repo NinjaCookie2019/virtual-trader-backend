@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     app_timezone: str = "Asia/Kolkata"
     frontend_origin: str = "http://localhost:5173"
     runtime_state_path: Path = Field(default=Path("app/storage/runtime_state.json"))
+    admin_api_key: str = ""
+    scheduler_secret: str = ""
 
     dhan_client_id: str = ""
     dhan_access_token: str = ""

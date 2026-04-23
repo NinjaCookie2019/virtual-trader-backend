@@ -247,6 +247,42 @@ class StrategyEngine:
         self._check_and_renew_token(force=True)
         return self.get_snapshot()
 
+    def reset_today_trade(self, trade_id: str, option_type: str | None = None) -> StrategySnapshot:
+        with self.lock:
+            session_date = self._today_session_date()
+            removed_trades = [
+                trade for trade in self.runtime.trade_history
+                if trade.trade_id == trade_id and self._trade_session_date(trade) == session_date
+            ]
+            if not removed_trades:
+                raise ValueError(f"Today trade {trade_id} was not found.")
+
+            reset_option_type = option_type or removed_trades[-1].option_type
+            self.runtime.trade_history = [
+                trade for trade in self.runtime.trade_history
+                if not (trade.trade_id == trade_id and self._trade_session_date(trade) == session_date)
+            ]
+            self.events = [
+                event for event in self.events
+                if not self._is_reset_trade_event(event, session_date, trade_id)
+            ]
+            self._log(
+                "warn",
+                "Trade Reset Lock",
+                (
+                    f"Today's {reset_option_type} paper trade was reset; "
+                    f"{reset_option_type} re-entry is locked until spot reclaims the breakout level."
+                ),
+                {
+                    "session_date": session_date,
+                    "option_type": reset_option_type,
+                    "trade_id": trade_id,
+                },
+            )
+            self._hydrate_session_state_from_history(session_date)
+            self._persist_and_emit()
+            return self.get_snapshot()
+
     def handle_market_tick(self, packet: dict[str, object]) -> None:
         ltp = self._extract_spot_ltp(packet)
         if ltp is None:
@@ -1285,6 +1321,21 @@ class StrategyEngine:
             if event.details.get("option_type") == option_type:
                 return True
         return False
+
+    def _is_reset_trade_event(self, event: ActivityEvent, session_date: str, trade_id: str) -> bool:
+        details = event.details or {}
+        if details.get("trade_id") == trade_id:
+            return True
+        trade_titles = {"Trade Size Raised", "Paper Trade Opened", "Paper Position Closed"}
+        if event.title not in trade_titles:
+            return False
+        return self._event_session_date(event) == session_date
+
+    def _event_session_date(self, event: ActivityEvent) -> str:
+        timestamp = event.timestamp
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(ZoneInfo(self.settings.app_timezone)).date().isoformat()
 
     def _is_market_session_open(self) -> bool:
         local_now = datetime.now(ZoneInfo(self.settings.app_timezone))

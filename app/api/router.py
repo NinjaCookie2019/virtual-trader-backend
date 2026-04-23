@@ -4,7 +4,7 @@ import asyncio
 import json
 from contextlib import suppress
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
 from app.services.dhan_gateway import DhanGatewayError
 from app.services.strategy_engine import StrategyEngine
@@ -45,6 +45,15 @@ class StateBroadcaster:
 def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRouter:
     router = APIRouter(prefix="/api")
 
+    def require_admin_access(request: Request, authorization: str | None) -> None:
+        expected_secret = engine.settings.admin_api_key or engine.settings.scheduler_secret
+        if expected_secret and authorization == f"Bearer {expected_secret}":
+            return
+        client_host = request.client.host if request.client else ""
+        if client_host in {"127.0.0.1", "::1", "localhost"}:
+            return
+        raise HTTPException(status_code=403, detail="Admin access required.")
+
     @router.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -71,6 +80,19 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
             return engine.get_option_chain_oi_changes(unique_strikes)
         except DhanGatewayError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    @router.post("/admin/reset-today-trade")
+    def reset_today_trade(
+        request: Request,
+        trade_id: str = Query(..., min_length=1),
+        option_type: str | None = Query(default=None, pattern="^(CALL|PUT)$"),
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin_access(request, authorization)
+        try:
+            return engine.reset_today_trade(trade_id=trade_id, option_type=option_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.websocket("/ws/state")
     async def state_socket(socket: WebSocket) -> None:
