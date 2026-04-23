@@ -3,6 +3,7 @@ from __future__ import annotations
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
+from app.models.schemas import ActivityEvent
 from app.core.config import Settings
 from app.services.dhan_gateway import DhanGatewayError, OptionContract, OptionOiSignal
 from app.services.strategy_engine import StrategyEngine
@@ -160,6 +161,34 @@ def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
 
     assert engine.runtime.trades_today == 1
     assert engine.runtime.previous_high_broken is True
+    assert triggered == []
+
+
+def test_trade_reset_lock_hydrates_breakout_without_counting_trade() -> None:
+    engine = build_engine()
+    engine.events.append(
+        ActivityEvent(
+            id="reset-lock",
+            timestamp=engine._now(),
+            level="warn",
+            title="Trade Reset Lock",
+            message="Today trade removed; keep PUT side locked until rearm.",
+            details={
+                "session_date": engine._today_session_date(),
+                "option_type": "PUT",
+            },
+        )
+    )
+
+    engine._hydrate_session_state_from_history(engine._today_session_date())
+
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+    engine._evaluate_breakout_from_state(89.0)
+
+    assert engine.runtime.trades_today == 0
+    assert engine.runtime.previous_low_broken is True
+    assert engine.runtime.previous_high_broken is False
     assert triggered == []
 
 

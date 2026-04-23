@@ -78,8 +78,8 @@ class StrategyEngine:
             session_date=session_date,
             trade_history=saved_trades[-100:],
         )
-        self._hydrate_session_state_from_history(session_date)
         self.events = saved_events[-150:]
+        self._hydrate_session_state_from_history(session_date)
 
         self.market_feed_thread: threading.Thread | None = None
         self.market_feed_stop = threading.Event()
@@ -1259,13 +1259,32 @@ class StrategyEngine:
             trade for trade in self.runtime.trade_history
             if self._trade_session_date(trade) == session_date
         ]
+        call_reset_locked = self._has_trade_reset_lock(session_date, "CALL")
+        put_reset_locked = self._has_trade_reset_lock(session_date, "PUT")
         self.runtime.trades_today = len(todays_trades)
-        self.runtime.previous_high_broken = any(trade.option_type == "CALL" for trade in todays_trades)
-        self.runtime.previous_low_broken = any(trade.option_type == "PUT" for trade in todays_trades)
+        self.runtime.previous_high_broken = (
+            any(trade.option_type == "CALL" for trade in todays_trades) or call_reset_locked
+        )
+        self.runtime.previous_low_broken = (
+            any(trade.option_type == "PUT" for trade in todays_trades) or put_reset_locked
+        )
         if todays_trades:
             latest_trade = max(todays_trades, key=lambda trade: trade.opened_at)
             self.runtime.last_signal = latest_trade.option_type
             self.runtime.last_signal_at = latest_trade.opened_at
+        else:
+            self.runtime.last_signal = None
+            self.runtime.last_signal_at = None
+
+    def _has_trade_reset_lock(self, session_date: str, option_type: str) -> bool:
+        for event in self.events:
+            if event.title != "Trade Reset Lock":
+                continue
+            if event.details.get("session_date") != session_date:
+                continue
+            if event.details.get("option_type") == option_type:
+                return True
+        return False
 
     def _is_market_session_open(self) -> bool:
         local_now = datetime.now(ZoneInfo(self.settings.app_timezone))
