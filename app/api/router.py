@@ -94,6 +94,14 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @router.post("/admin/renew-token")
+    def renew_token(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin_access(request, authorization)
+        return engine.renew_token_now()
+
     @router.websocket("/ws/state")
     async def state_socket(socket: WebSocket) -> None:
         await broadcaster.connect(socket)

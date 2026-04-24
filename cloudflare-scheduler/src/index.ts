@@ -1,4 +1,4 @@
-type SchedulerAction = "start" | "stop" | "status";
+type SchedulerAction = "start" | "stop" | "renew" | "status";
 
 interface Env {
   BACKEND_URL: string;
@@ -44,7 +44,7 @@ export default {
     }
 
     if (request.method !== "POST") {
-      return jsonResponse({ error: "Use POST /run?action=start|stop|status" }, 405);
+      return jsonResponse({ error: "Use POST /run?action=start|stop|renew|status" }, 405);
     }
 
     const unauthorized = authorize(request, env);
@@ -81,6 +81,8 @@ function determineAction(now: Date, env: Env): SchedulerDecision {
 
   if (istMinutes >= 855 && istMinutes <= 920) {
     action = "start";
+  } else if (istMinutes >= 1530 && istMinutes <= 1539) {
+    action = "renew";
   } else if (istMinutes >= 1540 && istMinutes <= 1555) {
     action = "stop";
   }
@@ -138,6 +140,26 @@ async function runScheduler(
     }
   }
 
+  if (decision.action === "renew") {
+    let backend = await readBackendState(env);
+    if (!backend.healthy && env.RAILWAY_API_TOKEN) {
+      await railwayStart(env);
+      backend = await waitForBackend(env);
+    }
+    if (!backend.healthy) {
+      throw new Error(`Backend is not healthy for token renewal: ${backend.error ?? backend.status}`);
+    }
+
+    const renewal = await renewBackendToken(env);
+    return {
+      ...context,
+      backend,
+      renewal,
+      dispatched: false,
+      message: "Dhan token renewal requested before Railway shutdown window.",
+    };
+  }
+
   if (env.RAILWAY_API_TOKEN) {
     const railway = decision.action === "start" ? await railwayStart(env) : await railwayStop(env);
     return {
@@ -180,6 +202,36 @@ async function readBackendState(env: Env) {
     status: state.status,
     state: state.ok ? await state.json().catch(() => null) : null,
   };
+}
+
+async function waitForBackend(env: Env) {
+  let backend = await readBackendState(env);
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (backend.healthy) {
+      return backend;
+    }
+    await delay(10_000);
+    backend = await readBackendState(env);
+  }
+  return backend;
+}
+
+async function renewBackendToken(env: Env) {
+  if (!env.SCHEDULER_SECRET) {
+    throw new Error("Missing SCHEDULER_SECRET secret for backend token renewal.");
+  }
+
+  const response = await fetchWithTimeout(`${env.BACKEND_URL}/api/admin/renew-token`, 20_000, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.SCHEDULER_SECRET}`,
+    },
+  });
+  const body = await response.text();
+  if (!response.ok) {
+    throw new Error(`Backend token renewal failed: HTTP ${response.status} ${body.slice(0, 500)}`);
+  }
+  return JSON.parse(body) as unknown;
 }
 
 async function dispatchGithubWorkflow(env: Env, action: SchedulerAction) {
@@ -303,22 +355,22 @@ function authorize(request: Request, env: Env) {
   return null;
 }
 
-async function fetchWithTimeout(url: string, timeoutMs: number) {
+async function fetchWithTimeout(url: string, timeoutMs: number, init?: RequestInit) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort("timeout"), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, { ...init, signal: controller.signal });
   } finally {
     clearTimeout(timeout);
   }
 }
 
 function parseAction(value: string): SchedulerAction {
-  if (value === "start" || value === "stop" || value === "status") {
+  if (value === "start" || value === "stop" || value === "renew" || value === "status") {
     return value;
   }
 
-  throw new Error("Invalid action. Use start, stop, or status.");
+  throw new Error("Invalid action. Use start, stop, renew, or status.");
 }
 
 function parseOptionalAction(value: string | undefined): SchedulerAction | null {
@@ -350,4 +402,8 @@ function jsonResponse(body: unknown, status = 200) {
       "Cache-Control": "no-store",
     },
   });
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

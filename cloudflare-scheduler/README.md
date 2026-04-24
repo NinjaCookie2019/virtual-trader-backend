@@ -8,6 +8,7 @@ Cloudflare cron expressions are UTC. This config uses weekday names to avoid num
 
 - `*/5 * * * MON-FRI` runs every 5 minutes on weekdays.
 - The Worker sends `start` only during `08:55` to `09:20` IST.
+- The Worker sends `renew` only during `15:30` to `15:39` IST so Dhan token renewal happens before shutdown.
 - The Worker sends `stop` only during `15:40` to `15:55` IST.
 
 The Worker checks the actual IST time before sending an action. If Cloudflare fires outside the allowed windows, it returns a no-op and does not call the backend.
@@ -27,5 +28,10 @@ Optional future direct mode:
 
 ```bash
 curl -X POST "https://virtual-trader-scheduler.<subdomain>.workers.dev/run?action=status" \
+  -H "Authorization: Bearer $SCHEDULER_SECRET"
+```
+
+```bash
+curl -X POST "https://virtual-trader-scheduler.<subdomain>.workers.dev/run?action=renew" \
   -H "Authorization: Bearer $SCHEDULER_SECRET"
 ```
