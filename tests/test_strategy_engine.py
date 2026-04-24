@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -328,3 +329,25 @@ def test_token_renewal_renews_when_validity_is_unknown() -> None:
     assert calls == ["check", "renew"]
     assert engine.connections.token_renewal_status == "renewed"
     assert engine.connections.last_error is None
+
+
+def test_saved_token_is_ignored_after_likely_expiry() -> None:
+    engine = build_engine()
+    stale_token = {
+        "access_token": "stale-token",
+        "token_valid_until": None,
+        "renewed_at": (engine._now() - timedelta(hours=24)).isoformat(),
+    }
+
+    assert engine._should_use_saved_token(stale_token) is False
+
+
+def test_saved_token_is_used_when_recently_renewed() -> None:
+    engine = build_engine()
+    recent_token = {
+        "access_token": "recent-token",
+        "token_valid_until": None,
+        "renewed_at": (engine._now() - timedelta(hours=2)).isoformat(),
+    }
+
+    assert engine._should_use_saved_token(recent_token) is True

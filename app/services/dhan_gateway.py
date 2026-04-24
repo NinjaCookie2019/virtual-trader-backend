@@ -359,6 +359,8 @@ class DhanGateway:
             on_status(False, "Dhan credentials missing.")
             return
 
+        retry_seconds = max(self.settings.market_feed_retry_seconds, 1.0)
+        max_retry_seconds = max(self.settings.market_feed_max_retry_seconds, retry_seconds)
         while not stop_event.is_set():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -371,13 +373,18 @@ class DhanGateway:
                 )
                 feed.run_forever()
                 on_status(True, None)
+                retry_seconds = max(self.settings.market_feed_retry_seconds, 1.0)
                 while not stop_event.is_set():
                     packet = feed.get_data()
                     if packet:
                         on_tick(packet)
             except Exception as exc:
-                on_status(False, str(exc))
-                time.sleep(5)
+                error = str(exc)
+                on_status(False, error)
+                if "429" in error:
+                    retry_seconds = max(retry_seconds, 30.0)
+                stop_event.wait(retry_seconds)
+                retry_seconds = min(retry_seconds * 2, max_retry_seconds)
             finally:
                 on_status(False, None)
                 loop.stop()

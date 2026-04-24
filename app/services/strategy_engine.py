@@ -62,7 +62,7 @@ class StrategyEngine:
         saved_token = self.token_store.load()
         saved_token_expiry = self._parse_saved_token_datetime(saved_token, "token_valid_until")
         saved_token_renewed_at = self._parse_saved_token_datetime(saved_token, "renewed_at")
-        if saved_token and saved_token.get("access_token"):
+        if saved_token and saved_token.get("access_token") and self._should_use_saved_token(saved_token):
             self.gateway.update_access_token(str(saved_token["access_token"]))
 
         self.connections = ConnectionState(
@@ -91,6 +91,7 @@ class StrategyEngine:
         self.token_renewal_stop = threading.Event()
         self.pending_oi_breakouts: dict[str, OptionOiSignal] = {}
         self._entry_window_open_on_last_tick = False
+        self._connection_error_log_state: dict[str, tuple[str, datetime]] = {}
 
     def set_notifier(self, notifier: Callable[[StrategySnapshot], None]) -> None:
         self.notifier = notifier
@@ -324,7 +325,8 @@ class StrategyEngine:
             if error:
                 self.connections.last_error = error
                 self._mark_token_error_if_auth_related(error)
-                self._log("error", "Market Feed", error)
+                if self._should_log_connection_error("market_feed", error):
+                    self._log("error", "Market Feed", error)
             self._persist_and_emit()
 
     def set_order_updates_status(self, connected: bool, error: str | None = None) -> None:
@@ -333,7 +335,8 @@ class StrategyEngine:
             if error:
                 self.connections.last_error = error
                 self._mark_token_error_if_auth_related(error)
-                self._log("error", "Order Updates", error)
+                if self._should_log_connection_error("order_updates", error):
+                    self._log("error", "Order Updates", error)
             self._persist_and_emit()
 
     def _evaluate_breakout(self, previous_spot: float, spot_price: float) -> None:
@@ -916,9 +919,28 @@ class StrategyEngine:
 
     def _mark_token_error_if_auth_related(self, error: str) -> None:
         normalized = error.lower()
-        auth_markers = ("401", "expired", "unauthorized", "invalid token", "access token", "dh-901")
+        auth_markers = ("401", "expired", "unauthorized", "invalid token", "token invalid", "access token", "dh-901")
         if any(marker in normalized for marker in auth_markers):
             self.connections.token_renewal_status = "expired" if "expired" in normalized else "error"
+
+    def _should_log_connection_error(self, key: str, error: str) -> bool:
+        now = self._now()
+        previous = self._connection_error_log_state.get(key)
+        if previous:
+            previous_error, previous_at = previous
+            if previous_error == error and (now - previous_at).total_seconds() < 60:
+                return False
+        self._connection_error_log_state[key] = (error, now)
+        return True
+
+    def _should_use_saved_token(self, saved_token: dict | None) -> bool:
+        token_valid_until = self._parse_saved_token_datetime(saved_token, "token_valid_until")
+        if token_valid_until and token_valid_until > self._now() + timedelta(minutes=5):
+            return True
+        renewed_at = self._parse_saved_token_datetime(saved_token, "renewed_at")
+        if renewed_at and self._now() - renewed_at < timedelta(hours=23):
+            return True
+        return False
 
     @staticmethod
     def _parse_saved_token_datetime(saved_token: dict | None, key: str) -> datetime | None:
