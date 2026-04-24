@@ -323,8 +323,9 @@ class StrategyEngine:
         with self.lock:
             self.connections.market_feed_connected = connected
             if error:
-                self.connections.last_error = error
                 self._mark_token_error_if_auth_related(error)
+                if self.connections.token_renewal_status not in {"error", "expired"}:
+                    self.connections.last_error = error
                 if self._should_log_connection_error("market_feed", error):
                     self._log("error", "Market Feed", error)
             self._persist_and_emit()
@@ -333,8 +334,9 @@ class StrategyEngine:
         with self.lock:
             self.connections.order_updates_connected = connected
             if error:
-                self.connections.last_error = error
                 self._mark_token_error_if_auth_related(error)
+                if self.connections.token_renewal_status not in {"error", "expired"}:
+                    self.connections.last_error = error
                 if self._should_log_connection_error("order_updates", error):
                     self._log("error", "Order Updates", error)
             self._persist_and_emit()
@@ -874,10 +876,17 @@ class StrategyEngine:
             error_message = str(exc)
             if token_check_error:
                 error_message = f"{error_message}. Token check failed before renewal: {token_check_error}"
+            auth_related_error = self._is_auth_related_error(error_message)
+            if auth_related_error:
+                self.market_feed_stop.set()
+                self.order_updates_stop.set()
             with self.lock:
                 self.connections.token_renewal_status = "error"
                 self.connections.last_error = error_message
                 self._mark_token_error_if_auth_related(error_message)
+                if auth_related_error:
+                    self.connections.market_feed_connected = False
+                    self.connections.order_updates_connected = False
                 self._log("error", "Token Renewal Failed", error_message)
                 self._persist_and_emit()
             return
@@ -918,10 +927,16 @@ class StrategyEngine:
         self._start_order_updates()
 
     def _mark_token_error_if_auth_related(self, error: str) -> None:
+        if not self._is_auth_related_error(error):
+            return
+        normalized = error.lower()
+        self.connections.token_renewal_status = "expired" if "expired" in normalized else "error"
+
+    @staticmethod
+    def _is_auth_related_error(error: str) -> bool:
         normalized = error.lower()
         auth_markers = ("401", "expired", "unauthorized", "invalid token", "token invalid", "access token", "dh-901")
-        if any(marker in normalized for marker in auth_markers):
-            self.connections.token_renewal_status = "expired" if "expired" in normalized else "error"
+        return any(marker in normalized for marker in auth_markers)
 
     def _should_log_connection_error(self, key: str, error: str) -> bool:
         now = self._now()
