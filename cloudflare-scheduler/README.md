@@ -13,6 +13,7 @@ Cloudflare cron expressions are UTC. This config uses weekday names to avoid num
 - The Worker sends `stop` only during `15:40` to `15:55` IST.
 
 The Worker checks the actual IST time before sending an action. If Cloudflare fires outside the allowed windows, it returns a no-op and does not call the backend.
+During a renewal window, the Worker first reads backend state. If the token is already valid for more than 6 hours, renewal is skipped to avoid repeated Dhan calls. If Railway is asleep and no direct Railway API token is configured, the Worker dispatches the GitHub start workflow and retries renewal on the next cron tick.
 
 ## Secrets
 

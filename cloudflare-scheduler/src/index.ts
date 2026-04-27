@@ -149,7 +149,24 @@ async function runScheduler(
       backend = await waitForBackend(env);
     }
     if (!backend.healthy) {
-      throw new Error(`Backend is not healthy for token renewal: ${backend.error ?? backend.status}`);
+      await dispatchGithubWorkflow(env, "start");
+      return {
+        ...context,
+        backend,
+        dispatched: true,
+        message: "Backend was asleep; start dispatched. Renewal will retry on the next cron tick.",
+      };
+    }
+
+    const tokenValidUntil = getTokenValidUntil(backend.state);
+    if (tokenValidUntil && tokenValidUntil.getTime() - Date.now() > 6 * 60 * 60 * 1000) {
+      return {
+        ...context,
+        backend,
+        renewal: null,
+        dispatched: false,
+        message: `Skipped renewal; token is already valid until ${tokenValidUntil.toISOString()}.`,
+      };
     }
 
     const renewal = await renewBackendToken(env);
@@ -178,6 +195,22 @@ async function runScheduler(
     dispatched: true,
     message: `GitHub workflow_dispatch sent with action=${decision.action}.`,
   };
+}
+
+function getTokenValidUntil(state: unknown): Date | null {
+  if (!state || typeof state !== "object") {
+    return null;
+  }
+  const connections = (state as { connections?: unknown }).connections;
+  if (!connections || typeof connections !== "object") {
+    return null;
+  }
+  const rawValue = (connections as { token_valid_until?: unknown }).token_valid_until;
+  if (typeof rawValue !== "string") {
+    return null;
+  }
+  const timestamp = Date.parse(rawValue);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : null;
 }
 
 async function readBackendState(env: Env) {
