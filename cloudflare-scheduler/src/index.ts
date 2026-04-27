@@ -81,6 +81,8 @@ function determineAction(now: Date, env: Env): SchedulerDecision {
 
   if (istMinutes >= 855 && istMinutes <= 920) {
     action = "start";
+  } else if (istMinutes >= 1130 && istMinutes <= 1230) {
+    action = "renew";
   } else if (istMinutes >= 1530 && istMinutes <= 1539) {
     action = "renew";
   } else if (istMinutes >= 1540 && istMinutes <= 1555) {
