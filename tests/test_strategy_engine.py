@@ -125,6 +125,63 @@ def test_capital_sizing_skips_when_one_lot_exceeds_account_equity() -> None:
     assert engine._calculate_trade_size(224.40) is None
 
 
+def test_time_decay_exit_triggers_after_12_minutes_without_minimum_profit() -> None:
+    engine = build_engine()
+    contract = OptionContract(
+        option_type="CALL",
+        strike=150,
+        security_id="test-call",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=100.0,
+        top_bid_price=99.0,
+        top_ask_price=100.0,
+    )
+    position = engine._build_position_state(
+        contract=contract,
+        fill_price=100.0,
+        lots=1,
+        quantity=65,
+        trade_value=6500.0,
+        mode="paper",
+        order_id="paper-time-decay",
+        entry_spot_price=101.0,
+        oi_signal=None,
+    )
+    position.opened_at = engine._now() - timedelta(minutes=12, seconds=1)
+
+    assert engine._is_time_decay_exit_due(position, 104.0) is True
+    assert engine._is_time_decay_exit_due(position, 105.0) is False
+
+
+def test_time_decay_exit_waits_before_12_minutes() -> None:
+    engine = build_engine()
+    contract = OptionContract(
+        option_type="PUT",
+        strike=50,
+        security_id="test-put",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=100.0,
+        top_bid_price=99.0,
+        top_ask_price=100.0,
+    )
+    position = engine._build_position_state(
+        contract=contract,
+        fill_price=100.0,
+        lots=1,
+        quantity=65,
+        trade_value=6500.0,
+        mode="paper",
+        order_id="paper-time-decay",
+        entry_spot_price=89.0,
+        oi_signal=None,
+    )
+    position.opened_at = engine._now() - timedelta(minutes=11, seconds=59)
+
+    assert engine._is_time_decay_exit_due(position, 80.0) is False
+
+
 def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
     engine = build_engine()
     contract = OptionContract(

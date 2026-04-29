@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     default_trailing_stop_enabled: bool = True
     default_trailing_activation_percent: float = 15.0
     default_trailing_distance_percent: float = 10.0
+    default_time_decay_exit_enabled: bool = True
+    default_time_decay_exit_minutes: int = 12
+    default_time_decay_min_profit_percent: float = 5.0
     default_auto_close_enabled: bool = True
     default_auto_close_time: str = "15:15"
     default_reverse_signal_exit_enabled: bool = False

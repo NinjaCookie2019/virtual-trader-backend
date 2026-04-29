@@ -55,6 +55,9 @@ class StrategyEngine:
             trailing_stop_enabled=settings.default_trailing_stop_enabled,
             trailing_activation_percent=settings.default_trailing_activation_percent,
             trailing_distance_percent=settings.default_trailing_distance_percent,
+            time_decay_exit_enabled=settings.default_time_decay_exit_enabled,
+            time_decay_exit_minutes=settings.default_time_decay_exit_minutes,
+            time_decay_min_profit_percent=settings.default_time_decay_min_profit_percent,
             auto_close_enabled=settings.default_auto_close_enabled,
             auto_close_time=settings.default_auto_close_time,
             reverse_signal_exit_enabled=settings.default_reverse_signal_exit_enabled,
@@ -752,6 +755,7 @@ class StrategyEngine:
                     stop_loss_price = position.stop_loss_price
                     target_price = position.target_price
                     trailing_stop_price = position.trailing_stop_price
+                    time_decay_exit_due = self._is_time_decay_exit_due(position, latest)
                     exit_in_progress = self.runtime.exit_in_progress
                     self._emit()
 
@@ -784,6 +788,19 @@ class StrategyEngine:
                     self._request_position_close(
                         reason="trailing_stop",
                         message=f"Trailing stop hit at option price {latest:.2f}.",
+                        triggered_price=latest,
+                    )
+                    continue
+                if time_decay_exit_due:
+                    held_minutes = (self._now() - position.opened_at).total_seconds() / 60
+                    profit_percent = ((latest - position.entry_price) / position.entry_price) * 100
+                    self._request_position_close(
+                        reason="time_decay",
+                        message=(
+                            f"Time-decay exit: held {held_minutes:.1f} minutes and option premium is "
+                            f"{profit_percent:.2f}% from entry, below required "
+                            f"{self.config.time_decay_min_profit_percent:.2f}%."
+                        ),
                         triggered_price=latest,
                     )
 
@@ -1433,6 +1450,20 @@ class StrategyEngine:
             return False
         return local_now.time() >= close_time
 
+    def _is_time_decay_exit_due(self, position: PositionState, current_price: float) -> bool:
+        if not self.config.time_decay_exit_enabled:
+            return False
+        if position.entry_price <= 0:
+            return False
+        opened_at = position.opened_at
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=timezone.utc)
+        held_minutes = (self._now() - opened_at).total_seconds() / 60
+        if held_minutes < self.config.time_decay_exit_minutes:
+            return False
+        profit_percent = ((current_price - position.entry_price) / position.entry_price) * 100
+        return profit_percent < self.config.time_decay_min_profit_percent
+
     def _normalize_config(self, config: StrategyConfig) -> StrategyConfig:
         normalized = config.model_copy(deep=True)
         normalized.no_trade_before_time = normalized.no_trade_before_time or self.settings.default_no_trade_before_time
@@ -1440,6 +1471,8 @@ class StrategyEngine:
         normalized.target_percent = min(max(normalized.target_percent, 10.0), 100.0)
         normalized.trailing_activation_percent = min(max(normalized.trailing_activation_percent, 5.0), 80.0)
         normalized.trailing_distance_percent = min(max(normalized.trailing_distance_percent, 3.0), 50.0)
+        normalized.time_decay_exit_minutes = min(max(normalized.time_decay_exit_minutes, 5), 60)
+        normalized.time_decay_min_profit_percent = min(max(normalized.time_decay_min_profit_percent, 1.0), 25.0)
         normalized.account_capital = max(normalized.account_capital, 1.0)
         normalized.trade_capital = min(max(normalized.trade_capital, 1.0), normalized.account_capital)
         normalized.lots = max(normalized.lots, 1)

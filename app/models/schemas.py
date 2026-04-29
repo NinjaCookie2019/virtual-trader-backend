@@ -35,6 +35,9 @@ class StrategyConfig(BaseModel):
     trailing_stop_enabled: bool = True
     trailing_activation_percent: float = 15.0
     trailing_distance_percent: float = 10.0
+    time_decay_exit_enabled: bool = True
+    time_decay_exit_minutes: int = 12
+    time_decay_min_profit_percent: float = 5.0
     auto_close_enabled: bool = True
     auto_close_time: str = "15:15"
     reverse_signal_exit_enabled: bool = True
@@ -173,6 +176,9 @@ class ConfigUpdateRequest(BaseModel):
     trailing_stop_enabled: bool | None = None
     trailing_activation_percent: float | None = None
     trailing_distance_percent: float | None = None
+    time_decay_exit_enabled: bool | None = None
+    time_decay_exit_minutes: int | None = None
+    time_decay_min_profit_percent: float | None = None
     auto_close_enabled: bool | None = None
     auto_close_time: str | None = None
     reverse_signal_exit_enabled: bool | None = None
