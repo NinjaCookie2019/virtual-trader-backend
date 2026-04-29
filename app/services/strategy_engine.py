@@ -361,6 +361,8 @@ class StrategyEngine:
             return
         if not self._is_trade_entry_window_open():
             return
+        if self._has_profitable_trade_today():
+            return
         if trades_today >= max_trades_per_day:
             return
         if last_signal_at and (self._now() - last_signal_at).total_seconds() < cooldown_seconds:
@@ -423,6 +425,8 @@ class StrategyEngine:
         if not is_enabled or reference_high is None or reference_low is None or has_open_position:
             return
         if not self._is_trade_entry_window_open():
+            return
+        if self._has_profitable_trade_today():
             return
         if trades_today >= max_trades_per_day:
             return
@@ -1358,6 +1362,15 @@ class StrategyEngine:
             if event.details.get("option_type") == option_type:
                 return True
         return False
+
+    def _has_profitable_trade_today(self) -> bool:
+        session_date = self.runtime.session_date or self._today_session_date()
+        return any(
+            trade.status == "CLOSED"
+            and trade.pnl > 0
+            and self._trade_session_date(trade) == session_date
+            for trade in self.runtime.trade_history
+        )
 
     def _is_reset_trade_event(self, event: ActivityEvent, session_date: str, trade_id: str) -> bool:
         details = event.details or {}

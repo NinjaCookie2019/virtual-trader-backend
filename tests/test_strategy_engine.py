@@ -165,6 +165,81 @@ def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
     assert triggered == []
 
 
+def test_profitable_trade_today_blocks_new_entries_even_when_daily_cap_allows() -> None:
+    engine = build_engine()
+    contract = OptionContract(
+        option_type="CALL",
+        strike=150,
+        security_id="test-call",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=10.0,
+        top_bid_price=9.9,
+        top_ask_price=10.0,
+    )
+    trade = engine._build_position_state(
+        contract=contract,
+        fill_price=10.0,
+        lots=1,
+        quantity=65,
+        trade_value=650.0,
+        mode="paper",
+        order_id="paper-profit",
+        entry_spot_price=101.0,
+        oi_signal=None,
+    )
+    trade.status = "CLOSED"
+    trade.closed_at = engine._now()
+    trade.pnl = 325.0
+    engine.runtime.trade_history.append(trade)
+    engine.runtime.trades_today = 1
+    engine.runtime.previous_high_broken = False
+
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+    engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
+    engine._evaluate_breakout_from_state(101.0)
+
+    assert triggered == []
+
+
+def test_losing_trade_today_can_retry_when_daily_cap_allows() -> None:
+    engine = build_engine()
+    contract = OptionContract(
+        option_type="CALL",
+        strike=150,
+        security_id="test-call",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=10.0,
+        top_bid_price=9.9,
+        top_ask_price=10.0,
+    )
+    trade = engine._build_position_state(
+        contract=contract,
+        fill_price=10.0,
+        lots=1,
+        quantity=65,
+        trade_value=650.0,
+        mode="paper",
+        order_id="paper-loss",
+        entry_spot_price=101.0,
+        oi_signal=None,
+    )
+    trade.status = "CLOSED"
+    trade.closed_at = engine._now()
+    trade.pnl = -130.0
+    engine.runtime.trade_history.append(trade)
+    engine.runtime.trades_today = 1
+    engine.runtime.previous_high_broken = False
+
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+    engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
+
+    assert triggered == [("CALL", 101.0)]
+
+
 def test_trade_reset_lock_hydrates_breakout_without_counting_trade() -> None:
     engine = build_engine()
     engine.events.append(
