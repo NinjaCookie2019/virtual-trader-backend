@@ -159,7 +159,8 @@ async function runScheduler(
     }
 
     const tokenValidUntil = getTokenValidUntil(backend.state);
-    if (tokenValidUntil && tokenValidUntil.getTime() - Date.now() > 6 * 60 * 60 * 1000) {
+    const isPreShutdownRenewal = decision.istMinutes >= 1530 && decision.istMinutes <= 1539;
+    if (!isPreShutdownRenewal && tokenValidUntil && tokenValidUntil.getTime() - Date.now() > 6 * 60 * 60 * 1000) {
       return {
         ...context,
         backend,

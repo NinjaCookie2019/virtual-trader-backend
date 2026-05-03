@@ -843,6 +843,26 @@ class StrategyEngine:
             token_valid_until = None
             token_check_error = str(exc)
 
+        if token_check_error and self._is_auth_related_error(token_check_error):
+            self.market_feed_stop.set()
+            self.order_updates_stop.set()
+            with self.lock:
+                self.connections.configured = True
+                self.connections.api_ready = False
+                self.connections.market_feed_connected = False
+                self.connections.order_updates_connected = False
+                self.connections.token_auto_renew_enabled = self.settings.dhan_auto_renew_enabled
+                self.connections.token_last_checked_at = now
+                self.connections.token_valid_until = None
+                self.connections.token_renewal_status = "error"
+                self.connections.last_error = (
+                    "Dhan rejected the current access token. Auto-renew cannot recover from an "
+                    f"invalid or expired token; replace DHAN_ACCESS_TOKEN in Railway. {token_check_error}"
+                )
+                self._log("error", "Token Invalid", self.connections.last_error)
+                self._persist_and_emit()
+            return
+
         should_renew = force or token_check_error is not None
         if token_valid_until:
             renew_at = token_valid_until - timedelta(minutes=max(self.settings.dhan_token_renew_buffer_minutes, 5.0))

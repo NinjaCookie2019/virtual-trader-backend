@@ -407,7 +407,7 @@ def test_call_oi_confirmation_allows_trade_when_resistance_decreases() -> None:
     assert "CE resistance change OI decreasing" in confirmed.rule
 
 
-def test_token_renewal_attempts_renew_when_validity_check_fails() -> None:
+def test_token_renewal_reports_auth_failure_without_renew_attempt() -> None:
     engine = build_engine()
     engine.settings.dhan_client_id = "client"
     engine.settings.dhan_access_token = "old-token"
@@ -422,7 +422,7 @@ def test_token_renewal_attempts_renew_when_validity_check_fails() -> None:
 
     def renew_token():
         calls.append("renew")
-        return "new-token", None, {"accessToken": "new-token"}
+        raise AssertionError("auth failures cannot be recovered by RenewToken")
 
     engine.gateway.fetch_token_valid_until = fail_token_check  # type: ignore[method-assign]
     engine.gateway.renew_access_token = renew_token  # type: ignore[method-assign]
@@ -430,9 +430,10 @@ def test_token_renewal_attempts_renew_when_validity_check_fails() -> None:
 
     engine._check_and_renew_token(force=False)
 
-    assert calls == ["check", "renew", "check"]
+    assert calls == ["check"]
     assert engine.connections.token_renewal_status == "error"
-    assert "Token check failed before renewal" in (engine.connections.last_error or "")
+    assert engine.connections.api_ready is False
+    assert "replace DHAN_ACCESS_TOKEN in Railway" in (engine.connections.last_error or "")
 
 
 def test_token_renewal_renews_when_validity_is_unknown() -> None:
