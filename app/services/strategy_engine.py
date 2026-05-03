@@ -958,6 +958,8 @@ class StrategyEngine:
         if self.order_updates_thread and self.order_updates_thread.is_alive():
             self.order_updates_thread.join(timeout=2.0)
 
+        self.market_feed_thread = None
+        self.order_updates_thread = None
         self.market_feed_stop = threading.Event()
         self.order_updates_stop = threading.Event()
         with self.lock:
