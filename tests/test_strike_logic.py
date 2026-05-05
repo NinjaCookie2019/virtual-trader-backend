@@ -16,9 +16,10 @@ class StrikeLogicTests(unittest.TestCase):
 
     def test_oi_confirmation_strike_uses_breakout_level(self):
         self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24480.65, "CALL", 50), 24500)
-        self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24241.25, "PUT", 50), 24150)
-        self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24352.90, "PUT", 50), 24300)
-        self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24350.00, "PUT", 50), 24300)
+        self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24004.75, "PUT", 50), 24000)
+        self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24241.25, "PUT", 50), 24200)
+        self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24352.90, "PUT", 50), 24350)
+        self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24350.00, "PUT", 50), 24350)
 
     def test_extract_change_oi_from_direct_or_previous_oi(self):
         self.assertEqual(DhanGateway._extract_change_oi({"change_oi": 120}), 120)
