@@ -325,6 +325,8 @@ class StrategyEngine:
     def set_market_feed_status(self, connected: bool, error: str | None = None) -> None:
         with self.lock:
             self.connections.market_feed_connected = connected
+            if connected and not error and self.connections.token_renewal_status not in {"error", "expired"}:
+                self.connections.last_error = None
             if error:
                 self._mark_token_error_if_auth_related(error)
                 if self.connections.token_renewal_status not in {"error", "expired"}:
@@ -336,6 +338,8 @@ class StrategyEngine:
     def set_order_updates_status(self, connected: bool, error: str | None = None) -> None:
         with self.lock:
             self.connections.order_updates_connected = connected
+            if connected and not error and self.connections.token_renewal_status not in {"error", "expired"}:
+                self.connections.last_error = None
             if error:
                 self._mark_token_error_if_auth_related(error)
                 if self.connections.token_renewal_status not in {"error", "expired"}:
