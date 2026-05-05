@@ -9,10 +9,11 @@ class StrikeLogicTests(unittest.TestCase):
         self.assertEqual(DhanGateway._calculate_otm_strike(25000, "CALL", 50), 25050)
         self.assertEqual(DhanGateway._calculate_otm_strike(25023, "CALL", 50), 25050)
 
-    def test_put_strike_moves_one_step_below_spot(self):
-        self.assertEqual(DhanGateway._calculate_otm_strike(25000, "PUT", 50), 24950)
-        self.assertEqual(DhanGateway._calculate_otm_strike(25023, "PUT", 50), 24950)
-        self.assertEqual(DhanGateway._calculate_otm_strike(24352.90, "PUT", 50), 24300)
+    def test_put_strike_uses_lower_bucket_for_spot(self):
+        self.assertEqual(DhanGateway._calculate_otm_strike(24050.00, "PUT", 50), 24050)
+        self.assertEqual(DhanGateway._calculate_otm_strike(24004.10, "PUT", 50), 24000)
+        self.assertEqual(DhanGateway._calculate_otm_strike(23990.00, "PUT", 50), 23950)
+        self.assertEqual(DhanGateway._calculate_otm_strike(24352.90, "PUT", 50), 24350)
 
     def test_oi_confirmation_strike_uses_breakout_level(self):
         self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24480.65, "CALL", 50), 24500)

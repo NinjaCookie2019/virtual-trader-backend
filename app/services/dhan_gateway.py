@@ -593,4 +593,4 @@ class DhanGateway:
     def _calculate_otm_strike(spot_price: float, option_type: str, strike_step: int) -> int:
         if option_type == "CALL":
             return int(floor(spot_price / strike_step) * strike_step + strike_step)
-        return int(floor(spot_price / strike_step) * strike_step) - strike_step
+        return int(floor(spot_price / strike_step) * strike_step)
