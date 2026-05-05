@@ -5,9 +5,11 @@ from app.services.dhan_gateway import DhanGateway
 
 
 class StrikeLogicTests(unittest.TestCase):
-    def test_call_strike_moves_one_step_above_spot(self):
-        self.assertEqual(DhanGateway._calculate_otm_strike(25000, "CALL", 50), 25050)
-        self.assertEqual(DhanGateway._calculate_otm_strike(25023, "CALL", 50), 25050)
+    def test_call_strike_uses_upper_bucket_for_spot(self):
+        self.assertEqual(DhanGateway._calculate_otm_strike(24000.00, "CALL", 50), 24000)
+        self.assertEqual(DhanGateway._calculate_otm_strike(24004.10, "CALL", 50), 24050)
+        self.assertEqual(DhanGateway._calculate_otm_strike(24050.00, "CALL", 50), 24050)
+        self.assertEqual(DhanGateway._calculate_otm_strike(24051.00, "CALL", 50), 24100)
 
     def test_put_strike_uses_lower_bucket_for_spot(self):
         self.assertEqual(DhanGateway._calculate_otm_strike(24050.00, "PUT", 50), 24050)
