@@ -13,3 +13,4 @@ cloudflare-scheduler/node_modules/
 cloudflare-scheduler/.dev.vars
 app/storage/runtime_state.json
 app/storage/dhan_token.json
+app/storage/trade_ledger.json
