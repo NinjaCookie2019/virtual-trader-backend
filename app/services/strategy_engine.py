@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
@@ -22,7 +23,19 @@ from app.models.schemas import (
     StrategySnapshot,
 )
 from app.services.dhan_gateway import DhanGateway, DhanGatewayError, OptionContract, OptionOiSignal
-from app.services.persistence import DhanTokenStore, RuntimeStateStore
+from app.services.persistence import DhanTokenStore, RuntimeStateStore, TradeLedgerStore
+
+
+@dataclass
+class OpeningGapLock:
+    option_type: str
+    trigger_price: float
+    baseline_spot_price: float
+    baseline_oi_signal: OptionOiSignal | None = None
+    baseline_option_strike: int | None = None
+    baseline_option_price: float | None = None
+    created_at: datetime | None = None
+    last_wait_log_at: datetime | None = None
 
 
 class StrategyEngine:
@@ -30,11 +43,15 @@ class StrategyEngine:
         self.settings = settings
         self.gateway = DhanGateway(settings)
         self.store = RuntimeStateStore(settings.runtime_state_path)
+        self.ledger_store = TradeLedgerStore(settings.trade_ledger_path)
         self.token_store = DhanTokenStore(settings.dhan_token_state_path)
         self.lock = threading.RLock()
         self.notifier: Callable[[StrategySnapshot], None] | None = None
 
         saved_config, saved_events, saved_trades = self.store.load()
+        saved_trades = self._merge_trades(self.ledger_store.load(), saved_trades)
+        if saved_trades:
+            self.ledger_store.replace_all(saved_trades)
         self.config = self._normalize_config(saved_config or StrategyConfig(
             enabled=settings.default_strategy_enabled,
             paper_trading=settings.default_paper_trading,
@@ -46,6 +63,9 @@ class StrategyEngine:
             product_type=settings.default_product_type,
             strike_step=settings.strike_step,
             oi_confirmation_enabled=settings.default_oi_confirmation_enabled,
+            gap_open_filter_enabled=settings.default_gap_open_filter_enabled,
+            gap_open_continuation_points=settings.default_gap_open_continuation_points,
+            gap_open_option_premium_min_move_percent=settings.default_gap_open_option_premium_min_move_percent,
             max_trades_per_day=settings.default_max_trades_per_day,
             cooldown_seconds=settings.default_cooldown_seconds,
             breakout_buffer=settings.default_breakout_buffer,
@@ -93,6 +113,7 @@ class StrategyEngine:
         self.token_renewal_thread: threading.Thread | None = None
         self.token_renewal_stop = threading.Event()
         self.pending_oi_breakouts: dict[str, OptionOiSignal] = {}
+        self.opening_gap_locks: dict[str, OpeningGapLock] = {}
         self._entry_window_open_on_last_tick = False
         self._connection_error_log_state: dict[str, tuple[str, datetime]] = {}
 
@@ -123,11 +144,13 @@ class StrategyEngine:
         self.order_updates_stop.set()
         self.position_poller_stop.set()
         self.store.save(self.config, self.events, self.runtime.trade_history)
+        self.ledger_store.replace_all(self._merge_trades(self.ledger_store.load(), self.runtime.trade_history))
 
     def get_snapshot(self) -> StrategySnapshot:
         with self.lock:
             self.runtime.market_session_open = self._is_market_session_open()
             self.runtime.next_trade_window_starts_at = self._next_trade_window_starts_at()
+            self._sync_opening_gap_runtime_flags()
             return StrategySnapshot(
                 app_name=self.settings.app_name,
                 generated_at=self._now(),
@@ -218,6 +241,8 @@ class StrategyEngine:
             if is_new_session:
                 self.runtime.previous_high_broken = False
                 self.runtime.previous_low_broken = False
+                self.opening_gap_locks.clear()
+                self._sync_opening_gap_runtime_flags()
                 self.runtime.trades_today = 0
                 self.runtime.last_signal = None
                 self.runtime.last_signal_at = None
@@ -251,6 +276,41 @@ class StrategyEngine:
         self._check_and_renew_token(force=True)
         return self.get_snapshot()
 
+    def get_trade_ledger(
+        self,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        status: str | None = "CLOSED",
+        option_type: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, object]:
+        trades = self.ledger_store.query(
+            from_date=from_date,
+            to_date=to_date,
+            status=status,
+            option_type=option_type,
+            limit=limit,
+        )
+        closed_trades = [trade for trade in trades if trade.status == "CLOSED"]
+        realized_pnl = sum(trade.pnl for trade in closed_trades)
+        winners = sum(1 for trade in closed_trades if trade.pnl > 0)
+        losers = sum(1 for trade in closed_trades if trade.pnl < 0)
+        flat = len(closed_trades) - winners - losers
+        return {
+            "generated_at": self._now(),
+            "trades": [trade.model_dump(mode="json") for trade in trades],
+            "summary": {
+                "count": len(trades),
+                "closed_count": len(closed_trades),
+                "realized_pnl": realized_pnl,
+                "winners": winners,
+                "losers": losers,
+                "flat": flat,
+                "win_rate": (winners / len(closed_trades) * 100) if closed_trades else 0.0,
+            },
+        }
+
     def reset_today_trade(self, trade_id: str, option_type: str | None = None) -> StrategySnapshot:
         with self.lock:
             session_date = self._today_session_date()
@@ -266,6 +326,8 @@ class StrategyEngine:
                 trade for trade in self.runtime.trade_history
                 if not (trade.trade_id == trade_id and self._trade_session_date(trade) == session_date)
             ]
+            for trade in removed_trades:
+                self.ledger_store.remove(trade.trade_id)
             self.events = [
                 event for event in self.events
                 if not self._is_reset_trade_event(event, session_date, trade_id)
@@ -363,6 +425,8 @@ class StrategyEngine:
             previous_low_broken = self.runtime.previous_low_broken
             has_pending_call_oi = "CALL" in self.pending_oi_breakouts
             has_pending_put_oi = "PUT" in self.pending_oi_breakouts
+            opening_gap_call_lock = self.opening_gap_locks.get("CALL")
+            opening_gap_put_lock = self.opening_gap_locks.get("PUT")
 
         if not is_enabled or reference_high is None or reference_low is None or has_open_position:
             return
@@ -378,11 +442,21 @@ class StrategyEngine:
         high_trigger = reference_high + breakout_buffer
         low_trigger = reference_low - breakout_buffer
 
+        if opening_gap_call_lock and spot_price > high_trigger and not previous_high_broken:
+            if self._opening_gap_price_continues(opening_gap_call_lock, spot_price):
+                self._trigger_trade("CALL", spot_price, opening_gap_call_lock)
+            return
+
         if previous_spot <= high_trigger < spot_price and not previous_high_broken:
             self._trigger_trade("CALL", spot_price)
             return
         if spot_price > high_trigger and not previous_high_broken and has_pending_call_oi:
             self._trigger_trade("CALL", spot_price)
+            return
+
+        if opening_gap_put_lock and spot_price < low_trigger and not previous_low_broken:
+            if self._opening_gap_price_continues(opening_gap_put_lock, spot_price):
+                self._trigger_trade("PUT", spot_price, opening_gap_put_lock)
             return
 
         if previous_spot >= low_trigger > spot_price and not previous_low_broken:
@@ -409,12 +483,33 @@ class StrategyEngine:
                 self.pending_oi_breakouts.pop("CALL", None)
                 changed = True
 
+            if "CALL" in self.opening_gap_locks and spot_price <= high_trigger:
+                self.opening_gap_locks.pop("CALL", None)
+                self._log(
+                    "info",
+                    "Opening Gap Lock Cleared",
+                    "CALL side can trade again after spot reclaimed the upside breakout trigger.",
+                    {"option_type": "CALL", "spot_price": spot_price, "trigger_price": high_trigger},
+                )
+                changed = True
+
             if self.runtime.previous_low_broken and spot_price >= low_trigger:
                 self.runtime.previous_low_broken = False
                 self.pending_oi_breakouts.pop("PUT", None)
                 changed = True
 
+            if "PUT" in self.opening_gap_locks and spot_price >= low_trigger:
+                self.opening_gap_locks.pop("PUT", None)
+                self._log(
+                    "info",
+                    "Opening Gap Lock Cleared",
+                    "PUT side can trade again after spot reclaimed the downside breakdown trigger.",
+                    {"option_type": "PUT", "spot_price": spot_price, "trigger_price": low_trigger},
+                )
+                changed = True
+
             if changed:
+                self._sync_opening_gap_runtime_flags()
                 self._persist_and_emit()
 
     def _evaluate_breakout_from_state(self, spot_price: float) -> None:
@@ -425,6 +520,7 @@ class StrategyEngine:
             has_open_position = self.runtime.open_position is not None and self.runtime.open_position.status == "OPEN"
             trades_today = self.runtime.trades_today
             breakout_buffer = self.config.breakout_buffer
+            gap_open_filter_enabled = self.config.gap_open_filter_enabled
             max_trades_per_day = self.config.max_trades_per_day
             previous_high_broken = self.runtime.previous_high_broken
             previous_low_broken = self.runtime.previous_low_broken
@@ -442,13 +538,214 @@ class StrategyEngine:
         low_trigger = reference_low - breakout_buffer
 
         if spot_price > high_trigger and not previous_high_broken:
+            if gap_open_filter_enabled:
+                self._lock_opening_gap("CALL", spot_price, high_trigger)
+                return
             self._trigger_trade("CALL", spot_price)
             return
 
         if spot_price < low_trigger and not previous_low_broken:
+            if gap_open_filter_enabled:
+                self._lock_opening_gap("PUT", spot_price, low_trigger)
+                return
             self._trigger_trade("PUT", spot_price)
 
-    def _trigger_trade(self, option_type: str, spot_price: float) -> None:
+    def _lock_opening_gap(self, option_type: str, spot_price: float, trigger_price: float) -> None:
+        with self.lock:
+            if option_type in self.opening_gap_locks:
+                return
+            expiry_date = self.reference_levels.expiry_date
+            strike_step = self.config.strike_step
+            oi_confirmation_enabled = self.config.oi_confirmation_enabled
+            lock = OpeningGapLock(
+                option_type=option_type,
+                trigger_price=trigger_price,
+                baseline_spot_price=spot_price,
+                created_at=self._now(),
+            )
+            self.opening_gap_locks[option_type] = lock
+            self._sync_opening_gap_runtime_flags()
+
+        if not expiry_date:
+            with self.lock:
+                self._log("warn", "Opening Gap Locked", "Gap entry blocked, but expiry date is not loaded yet.")
+                self._persist_and_emit()
+            return
+
+        try:
+            chain = self.gateway.fetch_option_chain(expiry_date)
+            oi_signal = self.gateway.evaluate_oi_confirmation(
+                chain=chain,
+                option_type=option_type,
+                trigger_price=trigger_price,
+                strike_step=strike_step,
+            ) if oi_confirmation_enabled else None
+            contract = self.gateway.resolve_contract_from_chain(
+                chain=chain,
+                spot_price=spot_price,
+                option_type=option_type,
+                strike_step=strike_step,
+                expiry_date=expiry_date,
+            )
+            baseline_price = self._entry_fill_price(contract)
+        except DhanGatewayError as exc:
+            with self.lock:
+                self.connections.last_error = str(exc)
+                self._log(
+                    "warn",
+                    "Opening Gap Locked",
+                    (
+                        f"{option_type} gap entry blocked at {spot_price:.2f}; "
+                        "baseline option/OI data could not be captured."
+                    ),
+                    {
+                        "option_type": option_type,
+                        "spot_price": spot_price,
+                        "trigger_price": trigger_price,
+                        "error": str(exc),
+                    },
+                )
+                self._persist_and_emit()
+            return
+
+        with self.lock:
+            current_lock = self.opening_gap_locks.get(option_type)
+            if not current_lock or current_lock.baseline_spot_price != spot_price:
+                return
+            current_lock.baseline_oi_signal = oi_signal
+            current_lock.baseline_option_strike = contract.strike
+            current_lock.baseline_option_price = baseline_price
+            self._log(
+                "warn",
+                "Opening Gap Locked",
+                (
+                    f"{option_type} gap entry blocked at {spot_price:.2f}. "
+                    "Waiting for fresh price continuation, post-gap OI, and option premium confirmation."
+                ),
+                {
+                    "option_type": option_type,
+                    "spot_price": spot_price,
+                    "trigger_price": trigger_price,
+                    "baseline_option_strike": contract.strike,
+                    "baseline_option_price": baseline_price,
+                    "baseline_ce_change_oi": oi_signal.ce_change_oi if oi_signal else None,
+                    "baseline_pe_change_oi": oi_signal.pe_change_oi if oi_signal else None,
+                },
+            )
+            self._persist_and_emit()
+
+    def _opening_gap_price_continues(self, lock: OpeningGapLock, spot_price: float) -> bool:
+        with self.lock:
+            continuation_points = max(self.config.gap_open_continuation_points, 0.0)
+
+        if lock.option_type == "CALL":
+            return spot_price >= lock.baseline_spot_price + continuation_points
+        return spot_price <= lock.baseline_spot_price - continuation_points
+
+    def _opening_gap_oi_confirms(
+        self,
+        lock: OpeningGapLock,
+        current: OptionOiSignal | None,
+    ) -> bool:
+        with self.lock:
+            oi_confirmation_enabled = self.config.oi_confirmation_enabled
+        if not oi_confirmation_enabled:
+            return True
+        if lock.baseline_oi_signal is None or current is None:
+            return False
+
+        ce_delta = current.ce_change_oi - lock.baseline_oi_signal.ce_change_oi
+        pe_delta = current.pe_change_oi - lock.baseline_oi_signal.pe_change_oi
+        if lock.option_type == "CALL":
+            return pe_delta > ce_delta and pe_delta > 0
+        return ce_delta > pe_delta and ce_delta > 0
+
+    def _opening_gap_oi_signal(
+        self,
+        lock: OpeningGapLock,
+        current: OptionOiSignal,
+    ) -> OptionOiSignal:
+        if lock.baseline_oi_signal is None:
+            return current
+
+        ce_delta = current.ce_change_oi - lock.baseline_oi_signal.ce_change_oi
+        pe_delta = current.pe_change_oi - lock.baseline_oi_signal.pe_change_oi
+        return OptionOiSignal(
+            option_type=current.option_type,
+            strike=current.strike,
+            ce_change_oi=current.ce_change_oi,
+            pe_change_oi=current.pe_change_oi,
+            confirmed=True,
+            rule=(
+                "post-gap fresh OI delta confirmed "
+                f"CE {ce_delta:.2f}, PE {pe_delta:.2f}"
+            ),
+        )
+
+    def _opening_gap_premium_confirms(
+        self,
+        lock: OpeningGapLock,
+        contract: OptionContract,
+        fill_price: float,
+    ) -> bool:
+        with self.lock:
+            min_move_percent = max(self.config.gap_open_option_premium_min_move_percent, 0.0)
+        if min_move_percent <= 0:
+            return True
+        if lock.baseline_option_price is None or lock.baseline_option_price <= 0:
+            return False
+        if lock.baseline_option_strike is not None and contract.strike != lock.baseline_option_strike:
+            return True
+
+        required_price = lock.baseline_option_price * (1 + min_move_percent / 100)
+        return fill_price >= required_price
+
+    def _log_opening_gap_wait(
+        self,
+        lock: OpeningGapLock,
+        spot_price: float,
+        trigger_price: float,
+        reason: str,
+        oi_signal: OptionOiSignal | None = None,
+        contract: OptionContract | None = None,
+        fill_price: float | None = None,
+    ) -> None:
+        with self.lock:
+            now = self._now()
+            if lock.last_wait_log_at and (now - lock.last_wait_log_at).total_seconds() < 30:
+                return
+            lock.last_wait_log_at = now
+            self._log(
+                "warn",
+                "Opening Gap Continuation Waiting",
+                reason,
+                {
+                    "option_type": lock.option_type,
+                    "spot_price": spot_price,
+                    "trigger_price": trigger_price,
+                    "baseline_spot_price": lock.baseline_spot_price,
+                    "baseline_option_strike": lock.baseline_option_strike,
+                    "baseline_option_price": lock.baseline_option_price,
+                    "current_option_strike": contract.strike if contract else None,
+                    "current_option_price": fill_price,
+                    "baseline_ce_change_oi": lock.baseline_oi_signal.ce_change_oi if lock.baseline_oi_signal else None,
+                    "baseline_pe_change_oi": lock.baseline_oi_signal.pe_change_oi if lock.baseline_oi_signal else None,
+                    "current_ce_change_oi": oi_signal.ce_change_oi if oi_signal else None,
+                    "current_pe_change_oi": oi_signal.pe_change_oi if oi_signal else None,
+                },
+            )
+            self._persist_and_emit()
+
+    def _sync_opening_gap_runtime_flags(self) -> None:
+        self.runtime.opening_gap_call_locked = "CALL" in self.opening_gap_locks
+        self.runtime.opening_gap_put_locked = "PUT" in self.opening_gap_locks
+
+    def _trigger_trade(
+        self,
+        option_type: str,
+        spot_price: float,
+        opening_gap_lock: OpeningGapLock | None = None,
+    ) -> None:
         with self.lock:
             expiry_date = self.reference_levels.expiry_date
             reference_high = self.reference_levels.previous_day_high
@@ -480,7 +777,19 @@ class StrategyEngine:
                 trigger_price=trigger_price,
                 strike_step=strike_step,
             ) if oi_confirmation_enabled else None
-            if oi_signal and not oi_signal.confirmed:
+            if opening_gap_lock and not self._opening_gap_oi_confirms(opening_gap_lock, oi_signal):
+                self._log_opening_gap_wait(
+                    opening_gap_lock,
+                    spot_price,
+                    trigger_price,
+                    "Fresh OI has not confirmed continuation after the gap.",
+                    oi_signal,
+                )
+                return
+            if opening_gap_lock and oi_signal:
+                oi_signal = self._opening_gap_oi_signal(opening_gap_lock, oi_signal)
+
+            if not opening_gap_lock and oi_signal and not oi_signal.confirmed:
                 weakening_signal = self._weakening_oi_confirmation(oi_signal)
                 if weakening_signal:
                     oi_signal = weakening_signal
@@ -518,6 +827,22 @@ class StrategyEngine:
                 strike_step=strike_step,
                 expiry_date=expiry_date,
             )
+            fill_price = self._entry_fill_price(contract)
+            if opening_gap_lock and not self._opening_gap_premium_confirms(opening_gap_lock, contract, fill_price):
+                self._log_opening_gap_wait(
+                    opening_gap_lock,
+                    spot_price,
+                    trigger_price,
+                    "Option premium has not made a fresh post-gap move.",
+                    oi_signal,
+                    contract,
+                    fill_price,
+                )
+                return
+            if opening_gap_lock:
+                with self.lock:
+                    self.opening_gap_locks.pop(option_type, None)
+                    self._sync_opening_gap_runtime_flags()
         except DhanGatewayError as exc:
             with self.lock:
                 self.connections.last_error = str(exc)
@@ -525,7 +850,6 @@ class StrategyEngine:
                 self._persist_and_emit()
                 return
 
-        fill_price = self._entry_fill_price(contract)
         sizing = self._calculate_trade_size(fill_price)
         if sizing is None:
             return
@@ -673,6 +997,7 @@ class StrategyEngine:
         position.exit_requested = False
         self.runtime.trade_history.append(position.model_copy(deep=True))
         self.runtime.trade_history = self.runtime.trade_history[-100:]
+        self.ledger_store.upsert(position)
         self.runtime.open_position = None
         self.runtime.selected_instrument = None
         self.runtime.exit_in_progress = False
@@ -1034,6 +1359,14 @@ class StrategyEngine:
     def _persist_and_emit(self) -> None:
         self.store.save(self.config, self.events, self.runtime.trade_history)
         self._emit()
+
+    @staticmethod
+    def _merge_trades(*groups: list[PositionState]) -> list[PositionState]:
+        by_id: dict[str, PositionState] = {}
+        for trades in groups:
+            for trade in trades:
+                by_id[trade.trade_id] = trade.model_copy(deep=True)
+        return sorted(by_id.values(), key=lambda trade: trade.closed_at or trade.opened_at)
 
     def _emit(self) -> None:
         if self.notifier:
@@ -1506,5 +1839,10 @@ class StrategyEngine:
         normalized.strike_step = max(normalized.strike_step, 50)
         normalized.max_trades_per_day = max(normalized.max_trades_per_day, 1)
         normalized.cooldown_seconds = max(normalized.cooldown_seconds, 0)
+        normalized.gap_open_continuation_points = max(normalized.gap_open_continuation_points, 0.0)
+        normalized.gap_open_option_premium_min_move_percent = min(
+            max(normalized.gap_open_option_premium_min_move_percent, 0.0),
+            25.0,
+        )
         normalized.auto_close_time = normalized.auto_close_time or self.settings.default_auto_close_time
         return normalized

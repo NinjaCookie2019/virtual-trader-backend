@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     app_timezone: str = "Asia/Kolkata"
     frontend_origin: str = "http://localhost:5173"
     runtime_state_path: Path = Field(default=Path("app/storage/runtime_state.json"))
+    trade_ledger_path: Path = Field(default=Path("app/storage/trade_ledger.json"))
     admin_api_key: str = ""
     scheduler_secret: str = ""
 
@@ -42,6 +43,9 @@ class Settings(BaseSettings):
     default_breakout_buffer: float = 0.0
     default_no_trade_before_time: str = "09:20"
     default_oi_confirmation_enabled: bool = True
+    default_gap_open_filter_enabled: bool = True
+    default_gap_open_continuation_points: float = 15.0
+    default_gap_open_option_premium_min_move_percent: float = 3.0
     default_stop_loss_percent: float = 15.0
     default_target_percent: float = 30.0
     default_trailing_stop_enabled: bool = True
@@ -72,6 +76,8 @@ def get_settings() -> Settings:
     settings = Settings()
     if not settings.runtime_state_path.is_absolute():
         settings.runtime_state_path = Path(__file__).resolve().parents[2] / settings.runtime_state_path
+    if not settings.trade_ledger_path.is_absolute():
+        settings.trade_ledger_path = Path(__file__).resolve().parents[2] / settings.trade_ledger_path
     if not settings.dhan_token_state_path.is_absolute():
         settings.dhan_token_state_path = Path(__file__).resolve().parents[2] / settings.dhan_token_state_path
     return settings

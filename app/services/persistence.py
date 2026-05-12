@@ -7,6 +7,26 @@ from pathlib import Path
 from app.models.schemas import ActivityEvent, PositionState, StrategyConfig
 
 
+def migrate_trade_payload(trade: dict) -> dict:
+    migrated = dict(trade)
+    legacy_quantity = migrated.get("quantity")
+    if migrated.get("lots") is None:
+        migrated["lots"] = 1
+    if migrated.get("lot_size") is None:
+        migrated["lot_size"] = max(int(legacy_quantity), 1) if legacy_quantity is not None else 65
+    if legacy_quantity is None:
+        migrated["quantity"] = max(int(migrated["lots"]) * int(migrated["lot_size"]), 1)
+    if int(migrated.get("lot_size") or 0) <= 1 and int(migrated.get("quantity") or 0) == int(migrated["lots"]):
+        migrated["lot_size"] = 65
+        migrated["quantity"] = max(int(migrated["lots"]) * int(migrated["lot_size"]), 1)
+    migrated.setdefault("trade_capital", 10000.0)
+    migrated["trade_value"] = float(migrated.get("entry_price", 0)) * int(migrated["quantity"])
+    migrated["pnl"] = (
+        float(migrated.get("current_price", 0)) - float(migrated.get("entry_price", 0))
+    ) * int(migrated["quantity"])
+    return migrated
+
+
 class RuntimeStateStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -19,7 +39,7 @@ class RuntimeStateStore:
         payload = json.loads(self.path.read_text(encoding="utf-8"))
         config = self._migrate_config(payload.get("config"))
         events = payload.get("events", [])
-        trades = [self._migrate_trade(item) for item in payload.get("trade_history", [])]
+        trades = [migrate_trade_payload(item) for item in payload.get("trade_history", [])]
         parsed_events = [ActivityEvent.model_validate(item) for item in events]
         parsed_trades = [PositionState.model_validate(item) for item in trades]
         return (
@@ -44,6 +64,9 @@ class RuntimeStateStore:
         legacy_quantity = migrated.pop("quantity", None)
         migrated.setdefault("capital_sizing_enabled", True)
         migrated.setdefault("oi_confirmation_enabled", True)
+        migrated.setdefault("gap_open_filter_enabled", True)
+        migrated.setdefault("gap_open_continuation_points", 15.0)
+        migrated.setdefault("gap_open_option_premium_min_move_percent", 3.0)
         migrated.setdefault("account_capital", 20000.0)
         migrated.setdefault("trade_capital", 10000.0)
         migrated.setdefault("lots", 1)
@@ -55,24 +78,90 @@ class RuntimeStateStore:
             migrated["lot_size"] = 65
         return migrated
 
-    def _migrate_trade(self, trade: dict) -> dict:
-        migrated = dict(trade)
-        legacy_quantity = migrated.get("quantity")
-        if migrated.get("lots") is None:
-            migrated["lots"] = 1
-        if migrated.get("lot_size") is None:
-            migrated["lot_size"] = max(int(legacy_quantity), 1) if legacy_quantity is not None else 65
-        if legacy_quantity is None:
-            migrated["quantity"] = max(int(migrated["lots"]) * int(migrated["lot_size"]), 1)
-        if int(migrated.get("lot_size") or 0) <= 1 and int(migrated.get("quantity") or 0) == int(migrated["lots"]):
-            migrated["lot_size"] = 65
-            migrated["quantity"] = max(int(migrated["lots"]) * int(migrated["lot_size"]), 1)
-        migrated.setdefault("trade_capital", 10000.0)
-        migrated["trade_value"] = float(migrated.get("entry_price", 0)) * int(migrated["quantity"])
-        migrated["pnl"] = (
-            float(migrated.get("current_price", 0)) - float(migrated.get("entry_price", 0))
-        ) * int(migrated["quantity"])
-        return migrated
+
+class TradeLedgerStore:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def load(self) -> list[PositionState]:
+        if not self.path.exists():
+            return []
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+
+        raw_trades = payload.get("trades") if isinstance(payload, dict) else payload
+        if not isinstance(raw_trades, list):
+            return []
+
+        parsed: list[PositionState] = []
+        for item in raw_trades:
+            if not isinstance(item, dict):
+                continue
+            try:
+                parsed.append(PositionState.model_validate(migrate_trade_payload(item)))
+            except Exception:
+                continue
+        return self._dedupe(parsed)
+
+    def replace_all(self, trades: list[PositionState]) -> None:
+        ordered = self._dedupe(trades)
+        payload = {
+            "trades": [trade.model_dump(mode="json") for trade in ordered],
+        }
+        self.path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def upsert(self, trade: PositionState) -> None:
+        trades = [existing for existing in self.load() if existing.trade_id != trade.trade_id]
+        trades.append(trade.model_copy(deep=True))
+        self.replace_all(trades)
+
+    def remove(self, trade_id: str) -> None:
+        self.replace_all([trade for trade in self.load() if trade.trade_id != trade_id])
+
+    def query(
+        self,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        status: str | None = None,
+        option_type: str | None = None,
+        limit: int | None = None,
+    ) -> list[PositionState]:
+        trades = self.load()
+        filtered: list[PositionState] = []
+        for trade in trades:
+            trade_date = self._trade_date_key(trade)
+            if from_date and trade_date < from_date:
+                continue
+            if to_date and trade_date > to_date:
+                continue
+            if status and status != "ALL" and trade.status != status:
+                continue
+            if option_type and option_type != "ALL" and trade.option_type != option_type:
+                continue
+            filtered.append(trade)
+
+        filtered.sort(key=lambda trade: trade.closed_at or trade.opened_at, reverse=True)
+        return filtered[:limit] if limit else filtered
+
+    @staticmethod
+    def _dedupe(trades: list[PositionState]) -> list[PositionState]:
+        by_id: dict[str, PositionState] = {}
+        for trade in trades:
+            by_id[trade.trade_id] = trade.model_copy(deep=True)
+        return sorted(by_id.values(), key=lambda trade: trade.closed_at or trade.opened_at)
+
+    @staticmethod
+    def _trade_date_key(trade: PositionState) -> str:
+        trade_time = trade.closed_at or trade.opened_at
+        return trade_time.date().isoformat()
+
+    @staticmethod
+    def _migrate_trade(trade: dict) -> dict:
+        return migrate_trade_payload(trade)
 
 
 class DhanTokenStore:

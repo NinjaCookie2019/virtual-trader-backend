@@ -62,6 +62,22 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
     def state():
         return engine.get_snapshot()
 
+    @router.get("/trades")
+    def trades(
+        from_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        to_date: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        status: str | None = Query(default="CLOSED", pattern="^(OPEN|CLOSED|ALL)$"),
+        option_type: str | None = Query(default=None, pattern="^(CALL|PUT|ALL)$"),
+        limit: int | None = Query(default=None, ge=1, le=1000),
+    ):
+        return engine.get_trade_ledger(
+            from_date=from_date,
+            to_date=to_date,
+            status=status,
+            option_type=option_type,
+            limit=limit,
+        )
+
     @router.get("/option-chain/oi-change")
     def option_chain_oi_change(strike: int = Query(..., ge=1)):
         try:

@@ -27,6 +27,9 @@ class StrategyConfig(BaseModel):
     strike_step: int = 50
     breakout_buffer: float = 0.0
     oi_confirmation_enabled: bool = True
+    gap_open_filter_enabled: bool = True
+    gap_open_continuation_points: float = 15.0
+    gap_open_option_premium_min_move_percent: float = 3.0
     max_trades_per_day: int = 2
     cooldown_seconds: int = 120
     no_trade_before_time: str = "09:20"
@@ -141,6 +144,8 @@ class StrategyRuntime(BaseModel):
     last_signal_at: datetime | None = None
     previous_high_broken: bool = False
     previous_low_broken: bool = False
+    opening_gap_call_locked: bool = False
+    opening_gap_put_locked: bool = False
     session_date: str | None = None
     market_session_open: bool = False
     next_trade_window_starts_at: datetime | None = None
@@ -168,6 +173,9 @@ class ConfigUpdateRequest(BaseModel):
     strike_step: int | None = None
     breakout_buffer: float | None = None
     oi_confirmation_enabled: bool | None = None
+    gap_open_filter_enabled: bool | None = None
+    gap_open_continuation_points: float | None = None
+    gap_open_option_premium_min_move_percent: float | None = None
     max_trades_per_day: int | None = None
     cooldown_seconds: int | None = None
     no_trade_before_time: str | None = None

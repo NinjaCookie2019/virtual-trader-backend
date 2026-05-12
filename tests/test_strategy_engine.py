@@ -7,7 +7,7 @@ from pathlib import Path
 from app.models.schemas import ActivityEvent
 from app.core.config import Settings
 from app.services.dhan_gateway import DhanGatewayError, OptionContract, OptionOiSignal
-from app.services.strategy_engine import StrategyEngine
+from app.services.strategy_engine import OpeningGapLock, StrategyEngine
 
 
 def build_engine() -> StrategyEngine:
@@ -16,6 +16,7 @@ def build_engine() -> StrategyEngine:
     engine = StrategyEngine(
         Settings(
             runtime_state_path=base_path / "runtime_state.json",
+            trade_ledger_path=base_path / "trade_ledger.json",
             dhan_token_state_path=base_path / "dhan_token.json",
             dhan_client_id="",
             dhan_access_token="",
@@ -25,6 +26,7 @@ def build_engine() -> StrategyEngine:
     )
     engine._test_temp_dir = temp_dir  # type: ignore[attr-defined]
     engine._is_market_session_open = lambda: True  # type: ignore[method-assign]
+    engine._is_trade_entry_window_open = lambda: True  # type: ignore[method-assign]
     engine.config.enabled = True
     engine.config.cooldown_seconds = 0
     engine.config.max_trades_per_day = 2
@@ -88,12 +90,13 @@ def test_breakout_does_not_trade_before_configured_entry_time() -> None:
     assert triggered == []
 
 
-def test_gap_down_is_evaluated_when_entry_window_opens() -> None:
+def test_gap_down_is_locked_when_entry_window_opens_and_requires_continuation() -> None:
     engine = build_engine()
     triggered: list[tuple[str, float]] = []
     entry_window_open = False
 
-    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+    engine.config.gap_open_continuation_points = 2.0
+    engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
     engine._is_trade_entry_window_open = lambda: entry_window_open  # type: ignore[method-assign]
 
     engine.handle_market_tick({"LTP": 89.0})
@@ -101,8 +104,30 @@ def test_gap_down_is_evaluated_when_entry_window_opens() -> None:
 
     entry_window_open = True
     engine.handle_market_tick({"LTP": 88.0})
+    assert triggered == []
+    assert engine.runtime.opening_gap_put_locked is True
 
-    assert triggered == [("PUT", 88.0)]
+    engine.handle_market_tick({"LTP": 87.0})
+    assert triggered == []
+
+    engine.handle_market_tick({"LTP": 86.0})
+    assert triggered == [("PUT", 86.0)]
+
+
+def test_gap_up_lock_clears_after_spot_reclaims_trigger() -> None:
+    engine = build_engine()
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+
+    engine._evaluate_breakout_from_state(102.0)
+    assert triggered == []
+    assert engine.runtime.opening_gap_call_locked is True
+
+    engine.handle_market_tick({"LTP": 100.0})
+    assert engine.runtime.opening_gap_call_locked is False
+
+    engine.handle_market_tick({"LTP": 101.0})
+    assert triggered == [("CALL", 101.0)]
 
 
 def test_capital_sizing_takes_one_lot_when_trade_budget_is_too_small_but_equity_allows() -> None:
@@ -359,7 +384,88 @@ def test_reset_today_trade_removes_trade_and_locks_side() -> None:
     assert snapshot.runtime.trades_today == 0
     assert snapshot.runtime.previous_low_broken is True
     assert snapshot.runtime.trade_history == []
+    assert engine.get_trade_ledger(status="ALL")["trades"] == []
     assert snapshot.events[-1].title == "Trade Reset Lock"
+
+
+def test_closed_trade_is_written_to_persistent_ledger() -> None:
+    engine = build_engine()
+    contract = OptionContract(
+        option_type="CALL",
+        strike=150,
+        security_id="test-call",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=10.0,
+        top_bid_price=9.9,
+        top_ask_price=10.0,
+    )
+    engine.runtime.open_position = engine._build_position_state(
+        contract=contract,
+        fill_price=10.0,
+        lots=1,
+        quantity=65,
+        trade_value=650.0,
+        mode="paper",
+        order_id="paper-ledger",
+        entry_spot_price=101.0,
+        oi_signal=None,
+    )
+
+    engine._mark_position_closed(
+        order_id="paper-exit",
+        exit_price=12.0,
+        exit_reason="target",
+    )
+
+    ledger = engine.get_trade_ledger(status="CLOSED")
+
+    assert ledger["summary"]["count"] == 1
+    assert ledger["summary"]["realized_pnl"] == 130.0
+    assert ledger["trades"][0]["trade_id"] == engine.runtime.trade_history[0].trade_id
+
+
+def test_engine_bootstraps_runtime_history_from_persistent_ledger() -> None:
+    engine = build_engine()
+    contract = OptionContract(
+        option_type="PUT",
+        strike=50,
+        security_id="test-put",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=10.0,
+        top_bid_price=9.9,
+        top_ask_price=10.0,
+    )
+    trade = engine._build_position_state(
+        contract=contract,
+        fill_price=10.0,
+        lots=1,
+        quantity=65,
+        trade_value=650.0,
+        mode="paper",
+        order_id="paper-ledger",
+        entry_spot_price=89.0,
+        oi_signal=None,
+    )
+    trade.status = "CLOSED"
+    trade.closed_at = engine._now()
+    trade.current_price = 8.0
+    trade.pnl = -130.0
+    engine.ledger_store.upsert(trade)
+
+    restarted = StrategyEngine(
+        Settings(
+            runtime_state_path=engine.settings.runtime_state_path,
+            trade_ledger_path=engine.settings.trade_ledger_path,
+            dhan_token_state_path=engine.settings.dhan_token_state_path,
+            dhan_client_id="",
+            dhan_access_token="",
+        )
+    )
+
+    assert restarted.runtime.trade_history[0].trade_id == trade.trade_id
+    assert restarted.get_trade_ledger(status="CLOSED")["summary"]["realized_pnl"] == -130.0
 
 
 def test_pending_call_breakout_is_rechecked_while_spot_stays_above_high() -> None:
@@ -378,6 +484,44 @@ def test_pending_call_breakout_is_rechecked_while_spot_stays_above_high() -> Non
     engine._evaluate_breakout(previous_spot=101.0, spot_price=102.0)
 
     assert triggered == [("CALL", 102.0)]
+
+
+def test_opening_gap_oi_uses_fresh_delta_from_baseline_not_raw_bias() -> None:
+    engine = build_engine()
+    lock = OpeningGapLock(
+        option_type="PUT",
+        trigger_price=90.0,
+        baseline_spot_price=88.0,
+        baseline_oi_signal=OptionOiSignal(
+            option_type="PUT",
+            strike=90,
+            ce_change_oi=2800000.0,
+            pe_change_oi=-600000.0,
+            confirmed=True,
+            rule="baseline",
+        ),
+    )
+    engine.opening_gap_locks["PUT"] = lock
+
+    stale_bearish_snapshot = OptionOiSignal(
+        option_type="PUT",
+        strike=90,
+        ce_change_oi=2800000.0,
+        pe_change_oi=-650000.0,
+        confirmed=True,
+        rule="CE change OI > PE change OI",
+    )
+    fresh_bearish_build = OptionOiSignal(
+        option_type="PUT",
+        strike=90,
+        ce_change_oi=2850000.0,
+        pe_change_oi=-650000.0,
+        confirmed=True,
+        rule="CE change OI > PE change OI",
+    )
+
+    assert engine._opening_gap_oi_confirms(lock, stale_bearish_snapshot) is False
+    assert engine._opening_gap_oi_confirms(lock, fresh_bearish_build) is True
 
 
 def test_call_oi_confirmation_allows_trade_when_resistance_decreases() -> None:
