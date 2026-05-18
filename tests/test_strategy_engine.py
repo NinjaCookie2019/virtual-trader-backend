@@ -524,6 +524,102 @@ def test_opening_gap_oi_uses_fresh_delta_from_baseline_not_raw_bias() -> None:
     assert engine._opening_gap_oi_confirms(lock, fresh_bearish_build) is True
 
 
+def test_opening_gap_trade_confirms_oi_at_live_atm_not_old_breakout_level() -> None:
+    engine = build_engine()
+    engine.reference_levels.previous_day_high = 23839.30
+    engine.reference_levels.previous_day_low = 23610.30
+    engine.reference_levels.expiry_date = "2026-05-19"
+
+    class FakeGateway:
+        def __init__(self) -> None:
+            self.oi_calls: list[dict[str, object]] = []
+
+        def fetch_option_chain(self, expiry_date: str) -> dict:
+            assert expiry_date == "2026-05-19"
+            return {"oc": {}}
+
+        def evaluate_oi_confirmation(
+            self,
+            *,
+            chain: dict,
+            option_type: str,
+            reference_price: float,
+            strike_step: int,
+            strike_basis: str = "breakout",
+        ) -> OptionOiSignal:
+            self.oi_calls.append(
+                {
+                    "option_type": option_type,
+                    "reference_price": reference_price,
+                    "strike_step": strike_step,
+                    "strike_basis": strike_basis,
+                }
+            )
+            return OptionOiSignal(
+                option_type="PUT",
+                strike=23400,
+                ce_change_oi=2886195.0,
+                pe_change_oi=-807950.0,
+                confirmed=True,
+                rule="post-gap fresh OI delta confirmed CE 544375.00, PE -11310.00",
+            )
+
+        def resolve_contract_from_chain(
+            self,
+            *,
+            chain: dict,
+            spot_price: float,
+            option_type: str,
+            strike_step: int,
+            expiry_date: str,
+        ) -> OptionContract:
+            assert spot_price == 23383.80
+            return OptionContract(
+                option_type="PUT",
+                strike=23350,
+                security_id="51347",
+                exchange_segment="NSE_FNO",
+                expiry_date=expiry_date,
+                last_price=116.75,
+                top_bid_price=116.50,
+                top_ask_price=116.75,
+            )
+
+    fake_gateway = FakeGateway()
+    engine.gateway = fake_gateway  # type: ignore[assignment]
+    lock = OpeningGapLock(
+        option_type="PUT",
+        trigger_price=23610.30,
+        baseline_spot_price=23399.50,
+        baseline_oi_signal=OptionOiSignal(
+            option_type="PUT",
+            strike=23400,
+            ce_change_oi=2341820.0,
+            pe_change_oi=-796640.0,
+            confirmed=True,
+            rule="baseline",
+        ),
+        baseline_option_strike=23350,
+        baseline_option_price=109.70,
+    )
+    engine.opening_gap_locks["PUT"] = lock
+
+    engine._trigger_trade("PUT", 23383.80, lock)
+
+    assert fake_gateway.oi_calls == [
+        {
+            "option_type": "PUT",
+            "reference_price": 23383.80,
+            "strike_step": 50,
+            "strike_basis": "atm",
+        }
+    ]
+    assert engine.runtime.open_position is not None
+    assert engine.runtime.open_position.strike == 23350
+    assert engine.runtime.open_position.entry_oi_strike == 23400
+    assert engine.runtime.open_position.entry_trigger_price == 23610.30
+
+
 def test_call_oi_confirmation_allows_trade_when_resistance_decreases() -> None:
     engine = build_engine()
     engine.pending_oi_breakouts["CALL"] = OptionOiSignal(

@@ -224,10 +224,14 @@ class DhanGateway:
         self,
         chain: dict[str, Any],
         option_type: str,
-        trigger_price: float,
+        reference_price: float,
         strike_step: int,
+        strike_basis: str = "breakout",
     ) -> OptionOiSignal:
-        strike = self._calculate_oi_confirmation_strike(trigger_price, option_type, strike_step)
+        if strike_basis == "atm":
+            strike = self._calculate_atm_strike(reference_price, strike_step)
+        else:
+            strike = self._calculate_oi_confirmation_strike(reference_price, option_type, strike_step)
         strike_key = f"{strike:.6f}"
         strike_row = (chain.get("oc") or {}).get(strike_key)
         if not strike_row:
@@ -499,6 +503,10 @@ class DhanGateway:
         if option_type == "CALL":
             return int(ceil(trigger_price / strike_step) * strike_step)
         return int(floor(trigger_price / strike_step) * strike_step)
+
+    @staticmethod
+    def _calculate_atm_strike(price: float, strike_step: int) -> int:
+        return int(floor((price / strike_step) + 0.5) * strike_step)
 
     @staticmethod
     def _extract_change_oi(leg: dict[str, Any]) -> float | None:

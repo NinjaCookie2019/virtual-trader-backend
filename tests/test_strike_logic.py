@@ -24,6 +24,11 @@ class StrikeLogicTests(unittest.TestCase):
         self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24352.90, "PUT", 50), 24350)
         self.assertEqual(DhanGateway._calculate_oi_confirmation_strike(24350.00, "PUT", 50), 24350)
 
+    def test_atm_confirmation_strike_uses_nearest_bucket_for_gap_entries(self):
+        self.assertEqual(DhanGateway._calculate_atm_strike(23383.80, 50), 23400)
+        self.assertEqual(DhanGateway._calculate_atm_strike(23374.95, 50), 23350)
+        self.assertEqual(DhanGateway._calculate_atm_strike(23375.00, 50), 23400)
+
     def test_extract_change_oi_from_direct_or_previous_oi(self):
         self.assertEqual(DhanGateway._extract_change_oi({"change_oi": 120}), 120)
         self.assertEqual(DhanGateway._extract_change_oi({"oi": 280, "previous_oi": 100}), 180)

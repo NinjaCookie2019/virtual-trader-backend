@@ -577,8 +577,9 @@ class StrategyEngine:
             oi_signal = self.gateway.evaluate_oi_confirmation(
                 chain=chain,
                 option_type=option_type,
-                trigger_price=trigger_price,
+                reference_price=spot_price,
                 strike_step=strike_step,
+                strike_basis="atm",
             ) if oi_confirmation_enabled else None
             contract = self.gateway.resolve_contract_from_chain(
                 chain=chain,
@@ -774,8 +775,9 @@ class StrategyEngine:
             oi_signal = self.gateway.evaluate_oi_confirmation(
                 chain=chain,
                 option_type=option_type,
-                trigger_price=trigger_price,
+                reference_price=spot_price if opening_gap_lock else trigger_price,
                 strike_step=strike_step,
+                strike_basis="atm" if opening_gap_lock else "breakout",
             ) if oi_confirmation_enabled else None
             if opening_gap_lock and not self._opening_gap_oi_confirms(opening_gap_lock, oi_signal):
                 self._log_opening_gap_wait(
