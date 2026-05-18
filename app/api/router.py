@@ -66,6 +66,7 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
             "environment": engine.settings.app_env,
             "commit": (
                 os.getenv("RAILWAY_GIT_COMMIT_SHA")
+                or os.getenv("APP_COMMIT_SHA")
                 or os.getenv("SOURCE_COMMIT")
                 or os.getenv("GIT_COMMIT")
                 or None
