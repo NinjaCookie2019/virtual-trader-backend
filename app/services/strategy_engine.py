@@ -4,7 +4,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, time as dt_time, timedelta, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -35,6 +35,16 @@ class OpeningGapLock:
     baseline_option_strike: int | None = None
     baseline_option_price: float | None = None
     created_at: datetime | None = None
+    last_wait_log_at: datetime | None = None
+
+
+@dataclass
+class PendingPriceBreakout:
+    option_type: str
+    trigger_price: float
+    first_seen_at: datetime
+    count: int = 1
+    last_spot_price: float | None = None
     last_wait_log_at: datetime | None = None
 
 
@@ -69,6 +79,9 @@ class StrategyEngine:
             max_trades_per_day=settings.default_max_trades_per_day,
             cooldown_seconds=settings.default_cooldown_seconds,
             breakout_buffer=settings.default_breakout_buffer,
+            breakout_confirmation_ticks=settings.default_breakout_confirmation_ticks,
+            breakout_confirmation_seconds=settings.default_breakout_confirmation_seconds,
+            second_trade_extra_buffer=settings.default_second_trade_extra_buffer,
             no_trade_before_time=settings.default_no_trade_before_time,
             stop_loss_percent=settings.default_stop_loss_percent,
             target_percent=settings.default_target_percent,
@@ -81,6 +94,8 @@ class StrategyEngine:
             auto_close_enabled=settings.default_auto_close_enabled,
             auto_close_time=settings.default_auto_close_time,
             reverse_signal_exit_enabled=settings.default_reverse_signal_exit_enabled,
+            reclaim_exit_enabled=settings.default_reclaim_exit_enabled,
+            reclaim_exit_buffer=settings.default_reclaim_exit_buffer,
         ))
         saved_token = self.token_store.load()
         saved_token_expiry = self._parse_saved_token_datetime(saved_token, "token_valid_until")
@@ -113,6 +128,7 @@ class StrategyEngine:
         self.token_renewal_thread: threading.Thread | None = None
         self.token_renewal_stop = threading.Event()
         self.pending_oi_breakouts: dict[str, OptionOiSignal] = {}
+        self.pending_price_breakouts: dict[str, PendingPriceBreakout] = {}
         self.opening_gap_locks: dict[str, OpeningGapLock] = {}
         self._entry_window_open_on_last_tick = False
         self._connection_error_log_state: dict[str, tuple[str, datetime]] = {}
@@ -425,6 +441,8 @@ class StrategyEngine:
             previous_low_broken = self.runtime.previous_low_broken
             has_pending_call_oi = "CALL" in self.pending_oi_breakouts
             has_pending_put_oi = "PUT" in self.pending_oi_breakouts
+            has_pending_call_price = "CALL" in self.pending_price_breakouts
+            has_pending_put_price = "PUT" in self.pending_price_breakouts
             opening_gap_call_lock = self.opening_gap_locks.get("CALL")
             opening_gap_put_lock = self.opening_gap_locks.get("PUT")
 
@@ -437,34 +455,70 @@ class StrategyEngine:
         if last_signal_at and (self._now() - last_signal_at).total_seconds() < cooldown_seconds:
             return
 
-        high_trigger = reference_high + breakout_buffer
-        low_trigger = reference_low - breakout_buffer
+        high_trigger = self._effective_entry_trigger("CALL", reference_high + breakout_buffer)
+        low_trigger = self._effective_entry_trigger("PUT", reference_low - breakout_buffer)
 
         if opening_gap_call_lock and spot_price > high_trigger and not previous_high_broken:
             if self._opening_gap_price_continues(opening_gap_call_lock, spot_price):
+                if not self._daily_entry_allowed("CALL", spot_price, high_trigger):
+                    return
                 self._trigger_trade("CALL", spot_price, opening_gap_call_lock)
             return
 
         if previous_spot <= high_trigger < spot_price and not previous_high_broken:
+            if not self._price_breakout_confirmed("CALL", spot_price, high_trigger):
+                return
+            if not self._daily_entry_allowed("CALL", spot_price, high_trigger):
+                return
             self._trigger_trade("CALL", spot_price)
             return
-        if spot_price > high_trigger and not previous_high_broken and has_pending_call_oi:
+        if (
+            spot_price > high_trigger
+            and not previous_high_broken
+            and (has_pending_call_oi or has_pending_call_price)
+        ):
+            if not self._price_breakout_confirmed("CALL", spot_price, high_trigger):
+                return
+            if not self._daily_entry_allowed("CALL", spot_price, high_trigger):
+                return
             self._trigger_trade("CALL", spot_price)
             return
 
         if opening_gap_put_lock and spot_price < low_trigger and not previous_low_broken:
             if self._opening_gap_price_continues(opening_gap_put_lock, spot_price):
+                if not self._daily_entry_allowed("PUT", spot_price, low_trigger):
+                    return
                 self._trigger_trade("PUT", spot_price, opening_gap_put_lock)
             return
 
         if previous_spot >= low_trigger > spot_price and not previous_low_broken:
+            if not self._price_breakout_confirmed("PUT", spot_price, low_trigger):
+                return
+            if not self._daily_entry_allowed("PUT", spot_price, low_trigger):
+                return
             self._trigger_trade("PUT", spot_price)
             return
-        if spot_price < low_trigger and not previous_low_broken and has_pending_put_oi:
+        if (
+            spot_price < low_trigger
+            and not previous_low_broken
+            and (has_pending_put_oi or has_pending_put_price)
+        ):
+            if not self._price_breakout_confirmed("PUT", spot_price, low_trigger):
+                return
+            if not self._daily_entry_allowed("PUT", spot_price, low_trigger):
+                return
             self._trigger_trade("PUT", spot_price)
 
     def _rearm_breakout_flags(self, spot_price: float) -> None:
         with self.lock:
+            pending_call_price = self.pending_price_breakouts.get("CALL")
+            if pending_call_price and spot_price <= pending_call_price.trigger_price:
+                self.pending_price_breakouts.pop("CALL", None)
+
+            pending_put_price = self.pending_price_breakouts.get("PUT")
+            if pending_put_price and spot_price >= pending_put_price.trigger_price:
+                self.pending_price_breakouts.pop("PUT", None)
+
             reference_high = self.reference_levels.previous_day_high
             reference_low = self.reference_levels.previous_day_low
             breakout_buffer = self.config.breakout_buffer
@@ -479,6 +533,7 @@ class StrategyEngine:
             if self.runtime.previous_high_broken and spot_price <= high_trigger:
                 self.runtime.previous_high_broken = False
                 self.pending_oi_breakouts.pop("CALL", None)
+                self.pending_price_breakouts.pop("CALL", None)
                 changed = True
 
             if "CALL" in self.opening_gap_locks and spot_price <= high_trigger:
@@ -494,6 +549,7 @@ class StrategyEngine:
             if self.runtime.previous_low_broken and spot_price >= low_trigger:
                 self.runtime.previous_low_broken = False
                 self.pending_oi_breakouts.pop("PUT", None)
+                self.pending_price_breakouts.pop("PUT", None)
                 changed = True
 
             if "PUT" in self.opening_gap_locks and spot_price >= low_trigger:
@@ -530,12 +586,16 @@ class StrategyEngine:
         if trades_today >= max_trades_per_day:
             return
 
-        high_trigger = reference_high + breakout_buffer
-        low_trigger = reference_low - breakout_buffer
+        high_trigger = self._effective_entry_trigger("CALL", reference_high + breakout_buffer)
+        low_trigger = self._effective_entry_trigger("PUT", reference_low - breakout_buffer)
 
         if spot_price > high_trigger and not previous_high_broken:
             if gap_open_filter_enabled:
                 self._lock_opening_gap("CALL", spot_price, high_trigger)
+                return
+            if not self._price_breakout_confirmed("CALL", spot_price, high_trigger):
+                return
+            if not self._daily_entry_allowed("CALL", spot_price, high_trigger):
                 return
             self._trigger_trade("CALL", spot_price)
             return
@@ -544,7 +604,96 @@ class StrategyEngine:
             if gap_open_filter_enabled:
                 self._lock_opening_gap("PUT", spot_price, low_trigger)
                 return
+            if not self._price_breakout_confirmed("PUT", spot_price, low_trigger):
+                return
+            if not self._daily_entry_allowed("PUT", spot_price, low_trigger):
+                return
             self._trigger_trade("PUT", spot_price)
+
+    def _price_breakout_confirmed(self, option_type: str, spot_price: float, trigger_price: float) -> bool:
+        with self.lock:
+            required_ticks = max(self.config.breakout_confirmation_ticks, 1)
+            required_seconds = max(self.config.breakout_confirmation_seconds, 0.0)
+            now = self._now()
+            pending = self.pending_price_breakouts.get(option_type)
+            if not pending or pending.trigger_price != trigger_price:
+                pending = PendingPriceBreakout(
+                    option_type=option_type,
+                    trigger_price=trigger_price,
+                    first_seen_at=now,
+                    last_spot_price=spot_price,
+                )
+                self.pending_price_breakouts[option_type] = pending
+            else:
+                pending.count += 1
+                pending.last_spot_price = spot_price
+
+            elapsed_seconds = (now - pending.first_seen_at).total_seconds()
+            confirmed = pending.count >= required_ticks and elapsed_seconds >= required_seconds
+            if confirmed:
+                self.pending_price_breakouts.pop(option_type, None)
+                return True
+
+            if not pending.last_wait_log_at or (now - pending.last_wait_log_at).total_seconds() >= 30:
+                pending.last_wait_log_at = now
+                self._log(
+                    "warn",
+                    "Breakout Confirmation Waiting",
+                    (
+                        f"{option_type} breakout is not sustained yet: "
+                        f"{pending.count}/{required_ticks} ticks and "
+                        f"{elapsed_seconds:.1f}/{required_seconds:.1f} seconds beyond trigger."
+                    ),
+                    {
+                        "option_type": option_type,
+                        "spot_price": spot_price,
+                        "trigger_price": trigger_price,
+                        "ticks": pending.count,
+                        "required_ticks": required_ticks,
+                        "elapsed_seconds": elapsed_seconds,
+                        "required_seconds": required_seconds,
+                    },
+                )
+                self._persist_and_emit()
+            return False
+
+    def _daily_entry_allowed(self, option_type: str, spot_price: float, trigger_price: float) -> bool:
+        with self.lock:
+            session_date = self.runtime.session_date or self._today_session_date()
+            todays_closed_trades = [
+                trade for trade in self.runtime.trade_history
+                if trade.status == "CLOSED" and self._trade_session_date(trade) == session_date
+            ]
+            if not todays_closed_trades:
+                return True
+
+            if any(trade.exit_reason == "stop_loss" for trade in todays_closed_trades):
+                self._log(
+                    "warn",
+                    "Daily Kill Switch",
+                    "New entry blocked because a stop-loss was already hit today.",
+                    {"option_type": option_type, "spot_price": spot_price, "trigger_price": trigger_price},
+                )
+                self._persist_and_emit()
+                return False
+
+            return True
+
+    def _effective_entry_trigger(self, option_type: str, base_trigger: float) -> float:
+        with self.lock:
+            extra_buffer = max(self.config.second_trade_extra_buffer, 0.0)
+            if extra_buffer <= 0:
+                return base_trigger
+            session_date = self.runtime.session_date or self._today_session_date()
+            has_profitable_trade_today = any(
+                trade.status == "CLOSED"
+                and trade.pnl > 0
+                and self._trade_session_date(trade) == session_date
+                for trade in self.runtime.trade_history
+            )
+        if not has_profitable_trade_today:
+            return base_trigger
+        return base_trigger + extra_buffer if option_type == "CALL" else base_trigger - extra_buffer
 
     def _lock_opening_gap(self, option_type: str, spot_price: float, trigger_price: float) -> None:
         with self.lock:
@@ -792,33 +941,29 @@ class StrategyEngine:
                 oi_signal = self._opening_gap_oi_signal(opening_gap_lock, oi_signal)
 
             if not opening_gap_lock and oi_signal and not oi_signal.confirmed:
-                weakening_signal = self._weakening_oi_confirmation(oi_signal)
-                if weakening_signal:
-                    oi_signal = weakening_signal
-                else:
-                    with self.lock:
-                        self.pending_oi_breakouts[option_type] = oi_signal
-                        self._log(
-                            "warn",
-                            "OI Confirmation Waiting",
-                            (
-                                f"Breakout detected but OI is not clean at strike {oi_signal.strike}: "
-                                f"CE change OI {oi_signal.ce_change_oi:.2f}, "
-                                f"PE change OI {oi_signal.pe_change_oi:.2f}. "
-                                f"Waiting for blocking OI to decrease or for {oi_signal.rule}."
-                            ),
-                            {
-                                "option_type": option_type,
-                                "spot_price": spot_price,
-                                "trigger_price": trigger_price,
-                                "oi_strike": oi_signal.strike,
-                                "ce_change_oi": oi_signal.ce_change_oi,
-                                "pe_change_oi": oi_signal.pe_change_oi,
-                                "required_rule": oi_signal.rule,
-                            },
-                        )
-                        self._persist_and_emit()
-                    return
+                with self.lock:
+                    self.pending_oi_breakouts[option_type] = oi_signal
+                    self._log(
+                        "warn",
+                        "OI Confirmation Waiting",
+                        (
+                            f"Breakout detected but OI is not clean at strike {oi_signal.strike}: "
+                            f"CE change OI {oi_signal.ce_change_oi:.2f}, "
+                            f"PE change OI {oi_signal.pe_change_oi:.2f}. "
+                            f"Waiting for clean confirmation: {oi_signal.rule}."
+                        ),
+                        {
+                            "option_type": option_type,
+                            "spot_price": spot_price,
+                            "trigger_price": trigger_price,
+                            "oi_strike": oi_signal.strike,
+                            "ce_change_oi": oi_signal.ce_change_oi,
+                            "pe_change_oi": oi_signal.pe_change_oi,
+                            "required_rule": oi_signal.rule,
+                        },
+                    )
+                    self._persist_and_emit()
+                return
             if oi_signal:
                 with self.lock:
                     self.pending_oi_breakouts.pop(option_type, None)
@@ -1040,7 +1185,7 @@ class StrategyEngine:
                 with self.lock:
                     position = self.runtime.open_position
                     current_session = self.runtime.session_date
-                if current_session != date.today().isoformat():
+                if current_session != self._today_session_date():
                     self.refresh_reference_levels()
                     continue
                 if not position or position.status != "OPEN" or not self.gateway.is_configured:
@@ -1414,44 +1559,6 @@ class StrategyEngine:
     def _entry_fill_price(contract: OptionContract) -> float:
         return contract.top_ask_price or contract.last_price or 0.0
 
-    def _weakening_oi_confirmation(self, current: OptionOiSignal) -> OptionOiSignal | None:
-        with self.lock:
-            previous = self.pending_oi_breakouts.get(current.option_type)
-        if not previous or previous.strike != current.strike:
-            return None
-
-        if current.option_type == "CALL" and current.ce_change_oi < previous.ce_change_oi:
-            return OptionOiSignal(
-                option_type=current.option_type,
-                strike=current.strike,
-                ce_change_oi=current.ce_change_oi,
-                pe_change_oi=current.pe_change_oi,
-                confirmed=True,
-                rule=(
-                    "CE resistance change OI decreasing "
-                    f"from {previous.ce_change_oi:.2f} to {current.ce_change_oi:.2f}"
-                ),
-                basis=current.basis,
-                reference_price=current.reference_price,
-            )
-
-        if current.option_type == "PUT" and current.pe_change_oi < previous.pe_change_oi:
-            return OptionOiSignal(
-                option_type=current.option_type,
-                strike=current.strike,
-                ce_change_oi=current.ce_change_oi,
-                pe_change_oi=current.pe_change_oi,
-                confirmed=True,
-                rule=(
-                    "PE support change OI decreasing "
-                    f"from {previous.pe_change_oi:.2f} to {current.pe_change_oi:.2f}"
-                ),
-                basis=current.basis,
-                reference_price=current.reference_price,
-            )
-
-        return None
-
     def _calculate_trade_size(self, fill_price: float) -> tuple[int, int, float] | None:
         with self.lock:
             capital_sizing_enabled = self.config.capital_sizing_enabled
@@ -1588,12 +1695,44 @@ class StrategyEngine:
             previous_high = self.reference_levels.previous_day_high
             previous_low = self.reference_levels.previous_day_low
             reverse_exit_enabled = self.config.reverse_signal_exit_enabled
+            reclaim_exit_enabled = self.config.reclaim_exit_enabled
+            reclaim_exit_buffer = self.config.reclaim_exit_buffer
             breakout_buffer = self.config.breakout_buffer
             exit_in_progress = self.runtime.exit_in_progress
 
-        if not position or position.status != "OPEN" or exit_in_progress or not reverse_exit_enabled:
+        if not position or position.status != "OPEN" or exit_in_progress:
             return
         if not self._is_market_session_open():
+            return
+        if (
+            reclaim_exit_enabled
+            and position.option_type == "CALL"
+            and previous_high is not None
+            and spot_price < previous_high - reclaim_exit_buffer
+        ):
+            self._request_position_close(
+                reason="reclaim_exit",
+                message=(
+                    f"Reclaim exit triggered as spot fell below previous day high "
+                    f"minus {reclaim_exit_buffer:.2f} at {spot_price:.2f}."
+                ),
+            )
+            return
+        if (
+            reclaim_exit_enabled
+            and position.option_type == "PUT"
+            and previous_low is not None
+            and spot_price > previous_low + reclaim_exit_buffer
+        ):
+            self._request_position_close(
+                reason="reclaim_exit",
+                message=(
+                    f"Reclaim exit triggered as spot moved above previous day low "
+                    f"plus {reclaim_exit_buffer:.2f} at {spot_price:.2f}."
+                ),
+            )
+            return
+        if not reverse_exit_enabled:
             return
         if (
             position.option_type == "CALL"
@@ -1829,12 +1968,23 @@ class StrategyEngine:
     def _normalize_config(self, config: StrategyConfig) -> StrategyConfig:
         normalized = config.model_copy(deep=True)
         normalized.no_trade_before_time = normalized.no_trade_before_time or self.settings.default_no_trade_before_time
+        if normalized.breakout_buffer <= 0:
+            normalized.breakout_buffer = self.settings.default_breakout_buffer
+        normalized.breakout_buffer = min(max(normalized.breakout_buffer, 0.0), 100.0)
+        normalized.breakout_confirmation_ticks = min(max(normalized.breakout_confirmation_ticks, 1), 20)
+        normalized.breakout_confirmation_seconds = min(max(normalized.breakout_confirmation_seconds, 0.0), 300.0)
+        normalized.second_trade_extra_buffer = min(max(normalized.second_trade_extra_buffer, 0.0), 100.0)
         normalized.stop_loss_percent = min(max(normalized.stop_loss_percent, 5.0), 40.0)
         normalized.target_percent = min(max(normalized.target_percent, 10.0), 100.0)
         normalized.trailing_activation_percent = min(max(normalized.trailing_activation_percent, 5.0), 80.0)
         normalized.trailing_distance_percent = min(max(normalized.trailing_distance_percent, 3.0), 50.0)
+        if normalized.trailing_activation_percent >= 15.0:
+            normalized.trailing_activation_percent = self.settings.default_trailing_activation_percent
+        if normalized.trailing_distance_percent >= 10.0:
+            normalized.trailing_distance_percent = self.settings.default_trailing_distance_percent
         normalized.time_decay_exit_minutes = min(max(normalized.time_decay_exit_minutes, 5), 60)
         normalized.time_decay_min_profit_percent = min(max(normalized.time_decay_min_profit_percent, 1.0), 25.0)
+        normalized.reclaim_exit_buffer = min(max(normalized.reclaim_exit_buffer, 0.0), 100.0)
         normalized.account_capital = max(normalized.account_capital, 1.0)
         normalized.trade_capital = min(max(normalized.trade_capital, 1.0), normalized.account_capital)
         normalized.lots = max(normalized.lots, 1)

@@ -26,6 +26,9 @@ class StrategyConfig(BaseModel):
     product_type: Literal["INTRADAY", "MARGIN", "CNC"] = "INTRADAY"
     strike_step: int = 50
     breakout_buffer: float = 0.0
+    breakout_confirmation_ticks: int = 3
+    breakout_confirmation_seconds: float = 30.0
+    second_trade_extra_buffer: float = 15.0
     oi_confirmation_enabled: bool = True
     gap_open_filter_enabled: bool = True
     gap_open_continuation_points: float = 15.0
@@ -44,6 +47,8 @@ class StrategyConfig(BaseModel):
     auto_close_enabled: bool = True
     auto_close_time: str = "15:15"
     reverse_signal_exit_enabled: bool = True
+    reclaim_exit_enabled: bool = True
+    reclaim_exit_buffer: float = 5.0
 
 
 class ConnectionState(BaseModel):
@@ -174,6 +179,9 @@ class ConfigUpdateRequest(BaseModel):
     product_type: Literal["INTRADAY", "MARGIN", "CNC"] | None = None
     strike_step: int | None = None
     breakout_buffer: float | None = None
+    breakout_confirmation_ticks: int | None = None
+    breakout_confirmation_seconds: float | None = None
+    second_trade_extra_buffer: float | None = None
     oi_confirmation_enabled: bool | None = None
     gap_open_filter_enabled: bool | None = None
     gap_open_continuation_points: float | None = None
@@ -192,6 +200,8 @@ class ConfigUpdateRequest(BaseModel):
     auto_close_enabled: bool | None = None
     auto_close_time: str | None = None
     reverse_signal_exit_enabled: bool | None = None
+    reclaim_exit_enabled: bool | None = None
+    reclaim_exit_buffer: float | None = None
 
 
 class ActionResponse(BaseModel):

@@ -31,10 +31,145 @@ def build_engine() -> StrategyEngine:
     engine.config.enabled = True
     engine.config.cooldown_seconds = 0
     engine.config.max_trades_per_day = 2
+    engine.config.breakout_buffer = 0.0
+    engine.config.breakout_confirmation_ticks = 1
+    engine.config.breakout_confirmation_seconds = 0.0
+    engine.config.second_trade_extra_buffer = 0.0
     engine.reference_levels.previous_day_high = 100.0
     engine.reference_levels.previous_day_low = 90.0
     engine.reference_levels.expiry_date = "2026-04-21"
     return engine
+
+
+def make_closed_trade(
+    engine: StrategyEngine,
+    *,
+    option_type: str = "CALL",
+    entry_spot_price: float = 101.0,
+    pnl: float = 0.0,
+    exit_reason: str | None = None,
+):
+    contract = OptionContract(
+        option_type=option_type,
+        strike=150 if option_type == "CALL" else 50,
+        security_id=f"test-{option_type.lower()}",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=10.0,
+        top_bid_price=9.9,
+        top_ask_price=10.0,
+    )
+    trade = engine._build_position_state(
+        contract=contract,
+        fill_price=10.0,
+        lots=1,
+        quantity=65,
+        trade_value=650.0,
+        mode="paper",
+        order_id=f"paper-{option_type.lower()}",
+        entry_spot_price=entry_spot_price,
+        oi_signal=None,
+    )
+    trade.status = "CLOSED"
+    trade.closed_at = engine._now()
+    trade.pnl = pnl
+    trade.exit_reason = exit_reason
+    return trade
+
+
+def test_price_breakout_requires_sustained_ticks_before_trade() -> None:
+    engine = build_engine()
+    engine.config.breakout_confirmation_ticks = 2
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+
+    engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
+
+    assert triggered == []
+    assert "CALL" in engine.pending_price_breakouts
+
+    engine._evaluate_breakout(previous_spot=101.0, spot_price=102.0)
+
+    assert triggered == [("CALL", 102.0)]
+    assert "CALL" not in engine.pending_price_breakouts
+
+
+def test_price_breakout_confirmation_resets_when_spot_reclaims_trigger() -> None:
+    engine = build_engine()
+    engine.config.breakout_confirmation_ticks = 2
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+
+    engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
+    engine._rearm_breakout_flags(99.0)
+    engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
+
+    assert triggered == []
+    assert engine.pending_price_breakouts["CALL"].count == 1
+
+    engine._evaluate_breakout(previous_spot=101.0, spot_price=102.0)
+
+    assert triggered == [("CALL", 102.0)]
+
+
+def test_stop_loss_today_blocks_new_entries() -> None:
+    engine = build_engine()
+    engine.runtime.trade_history.append(make_closed_trade(engine, pnl=-130.0, exit_reason="stop_loss"))
+    engine.runtime.trades_today = 1
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+
+    engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
+
+    assert triggered == []
+    assert engine.events[-1].title == "Daily Kill Switch"
+
+
+def test_profitable_first_trade_uses_stricter_second_breakout_trigger() -> None:
+    engine = build_engine()
+    engine.config.second_trade_extra_buffer = 10.0
+    engine.runtime.trade_history.append(make_closed_trade(engine, pnl=325.0, exit_reason="target"))
+    engine.runtime.trades_today = 1
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+
+    engine._evaluate_breakout(previous_spot=99.0, spot_price=105.0)
+    engine._evaluate_breakout(previous_spot=105.0, spot_price=111.0)
+
+    assert triggered == [("CALL", 111.0)]
+
+
+def test_reclaim_exit_closes_call_when_spot_falls_back_below_high() -> None:
+    engine = build_engine()
+    contract = OptionContract(
+        option_type="CALL",
+        strike=150,
+        security_id="test-call",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-04-21",
+        last_price=10.0,
+        top_bid_price=9.9,
+        top_ask_price=10.0,
+    )
+    engine.config.reverse_signal_exit_enabled = False
+    engine.config.reclaim_exit_enabled = True
+    engine.config.reclaim_exit_buffer = 5.0
+    engine.runtime.open_position = engine._build_position_state(
+        contract=contract,
+        fill_price=10.0,
+        lots=1,
+        quantity=65,
+        trade_value=650.0,
+        mode="paper",
+        order_id="paper-reclaim",
+        entry_spot_price=101.0,
+        oi_signal=None,
+    )
+
+    engine._evaluate_reverse_signal_exit(previous_spot=101.0, spot_price=94.0)
+
+    assert engine.runtime.open_position is None
+    assert engine.runtime.trade_history[-1].exit_reason == "reclaim_exit"
 
 
 def test_high_breakout_rearms_only_after_spot_returns_below_high() -> None:
@@ -765,31 +900,54 @@ def test_legacy_gap_trade_migration_marks_old_breakout_oi_basis() -> None:
     assert migrated["entry_oi_reference_price"] == 23610.3
 
 
-def test_call_oi_confirmation_allows_trade_when_resistance_decreases() -> None:
+def test_weak_oi_confirmation_waits_instead_of_trading_on_resistance_decrease() -> None:
     engine = build_engine()
-    engine.pending_oi_breakouts["CALL"] = OptionOiSignal(
-        option_type="CALL",
-        strike=100,
-        ce_change_oi=50.0,
-        pe_change_oi=45.0,
-        confirmed=False,
-        rule="PE change OI > CE change OI",
-    )
+    calls: list[tuple[str, float]] = []
 
-    confirmed = engine._weakening_oi_confirmation(
-        OptionOiSignal(
-            option_type="CALL",
-            strike=100,
-            ce_change_oi=49.0,
-            pe_change_oi=45.0,
-            confirmed=False,
-            rule="PE change OI > CE change OI",
-        )
-    )
+    class FakeGateway:
+        def fetch_option_chain(self, expiry_date: str) -> dict:
+            return {"oc": {}}
 
-    assert confirmed is not None
-    assert confirmed.confirmed is True
-    assert "CE resistance change OI decreasing" in confirmed.rule
+        def evaluate_oi_confirmation(
+            self,
+            *,
+            chain: dict,
+            option_type: str,
+            reference_price: float,
+            strike_step: int,
+            strike_basis: str = "breakout",
+        ) -> OptionOiSignal:
+            return OptionOiSignal(
+                option_type="CALL",
+                strike=100,
+                ce_change_oi=49.0,
+                pe_change_oi=45.0,
+                confirmed=False,
+                rule="PE change OI > CE change OI",
+                basis=strike_basis,
+                reference_price=reference_price,
+            )
+
+        def resolve_contract_from_chain(self, **kwargs) -> OptionContract:
+            calls.append((kwargs["option_type"], kwargs["spot_price"]))
+            return OptionContract(
+                option_type="CALL",
+                strike=150,
+                security_id="test-call",
+                exchange_segment="NSE_FNO",
+                expiry_date=kwargs["expiry_date"],
+                last_price=10.0,
+                top_bid_price=9.9,
+                top_ask_price=10.0,
+            )
+
+    engine.gateway = FakeGateway()  # type: ignore[assignment]
+
+    engine._trigger_trade("CALL", 101.0)
+
+    assert calls == []
+    assert engine.runtime.open_position is None
+    assert "CALL" in engine.pending_oi_breakouts
 
 
 def test_token_renewal_reports_auth_failure_without_renew_attempt() -> None:

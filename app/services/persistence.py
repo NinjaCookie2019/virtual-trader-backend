@@ -97,11 +97,16 @@ class RuntimeStateStore:
         migrated.setdefault("capital_sizing_enabled", True)
         migrated.setdefault("oi_confirmation_enabled", True)
         migrated.setdefault("gap_open_filter_enabled", True)
+        migrated.setdefault("breakout_confirmation_ticks", 3)
+        migrated.setdefault("breakout_confirmation_seconds", 30.0)
+        migrated.setdefault("second_trade_extra_buffer", 15.0)
         migrated.setdefault("gap_open_continuation_points", 15.0)
         migrated.setdefault("gap_open_option_premium_min_move_percent", 3.0)
         migrated.setdefault("account_capital", 20000.0)
         migrated.setdefault("trade_capital", 10000.0)
         migrated.setdefault("lots", 1)
+        migrated.setdefault("reclaim_exit_enabled", True)
+        migrated.setdefault("reclaim_exit_buffer", 5.0)
         if legacy_quantity is not None:
             migrated.setdefault("lot_size", 65)
         else:
