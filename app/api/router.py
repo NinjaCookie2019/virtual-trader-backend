@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import suppress
 
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -57,6 +58,20 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
     @router.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @router.get("/version")
+    def version() -> dict[str, str | None]:
+        return {
+            "app_name": engine.settings.app_name,
+            "environment": engine.settings.app_env,
+            "commit": (
+                os.getenv("RAILWAY_GIT_COMMIT_SHA")
+                or os.getenv("SOURCE_COMMIT")
+                or os.getenv("GIT_COMMIT")
+                or None
+            ),
+            "deployment_id": os.getenv("RAILWAY_DEPLOYMENT_ID") or None,
+        }
 
     @router.get("/state")
     def state():

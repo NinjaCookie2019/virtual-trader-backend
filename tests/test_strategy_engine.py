@@ -7,6 +7,7 @@ from pathlib import Path
 from app.models.schemas import ActivityEvent
 from app.core.config import Settings
 from app.services.dhan_gateway import DhanGatewayError, OptionContract, OptionOiSignal
+from app.services.persistence import migrate_trade_payload
 from app.services.strategy_engine import OpeningGapLock, StrategyEngine
 
 
@@ -247,7 +248,7 @@ def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
     assert triggered == []
 
 
-def test_profitable_trade_today_blocks_new_entries_even_when_daily_cap_allows() -> None:
+def test_profitable_trade_today_can_retry_when_daily_cap_allows() -> None:
     engine = build_engine()
     contract = OptionContract(
         option_type="CALL",
@@ -282,7 +283,7 @@ def test_profitable_trade_today_blocks_new_entries_even_when_daily_cap_allows() 
     engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
     engine._evaluate_breakout_from_state(101.0)
 
-    assert triggered == []
+    assert triggered == [("CALL", 101.0)]
 
 
 def test_losing_trade_today_can_retry_when_daily_cap_allows() -> None:
@@ -590,6 +591,8 @@ def test_opening_gap_trade_confirms_oi_at_live_atm_not_old_breakout_level() -> N
                 pe_change_oi=-807950.0,
                 confirmed=True,
                 rule="post-gap fresh OI delta confirmed CE 544375.00, PE -11310.00",
+                basis=strike_basis,
+                reference_price=reference_price,
             )
 
         def resolve_contract_from_chain(
@@ -645,7 +648,121 @@ def test_opening_gap_trade_confirms_oi_at_live_atm_not_old_breakout_level() -> N
     assert engine.runtime.open_position is not None
     assert engine.runtime.open_position.strike == 23350
     assert engine.runtime.open_position.entry_oi_strike == 23400
+    assert engine.runtime.open_position.entry_oi_basis == "atm"
+    assert engine.runtime.open_position.entry_oi_reference_price == 23383.80
     assert engine.runtime.open_position.entry_trigger_price == 23610.30
+
+
+def test_normal_breakout_trade_confirms_oi_at_live_atm() -> None:
+    engine = build_engine()
+    engine.reference_levels.previous_day_high = 100.0
+    engine.reference_levels.previous_day_low = 90.0
+    engine.reference_levels.expiry_date = "2026-04-21"
+
+    class FakeGateway:
+        def __init__(self) -> None:
+            self.oi_calls: list[dict[str, object]] = []
+
+        def fetch_option_chain(self, expiry_date: str) -> dict:
+            return {"oc": {}}
+
+        def evaluate_oi_confirmation(
+            self,
+            *,
+            chain: dict,
+            option_type: str,
+            reference_price: float,
+            strike_step: int,
+            strike_basis: str = "breakout",
+        ) -> OptionOiSignal:
+            self.oi_calls.append(
+                {
+                    "option_type": option_type,
+                    "reference_price": reference_price,
+                    "strike_basis": strike_basis,
+                }
+            )
+            return OptionOiSignal(
+                option_type="CALL",
+                strike=100,
+                ce_change_oi=10.0,
+                pe_change_oi=20.0,
+                confirmed=True,
+                rule="PE change OI > CE change OI",
+                basis=strike_basis,
+                reference_price=reference_price,
+            )
+
+        def resolve_contract_from_chain(
+            self,
+            *,
+            chain: dict,
+            spot_price: float,
+            option_type: str,
+            strike_step: int,
+            expiry_date: str,
+        ) -> OptionContract:
+            return OptionContract(
+                option_type="CALL",
+                strike=150,
+                security_id="test-call",
+                exchange_segment="NSE_FNO",
+                expiry_date=expiry_date,
+                last_price=10.0,
+                top_bid_price=9.9,
+                top_ask_price=10.0,
+            )
+
+    fake_gateway = FakeGateway()
+    engine.gateway = fake_gateway  # type: ignore[assignment]
+
+    engine._trigger_trade("CALL", 101.2)
+
+    assert fake_gateway.oi_calls == [
+        {
+            "option_type": "CALL",
+            "reference_price": 101.2,
+            "strike_basis": "atm",
+        }
+    ]
+    assert engine.runtime.open_position is not None
+    assert engine.runtime.open_position.entry_oi_basis == "atm"
+    assert engine.runtime.open_position.entry_oi_reference_price == 101.2
+
+
+def test_legacy_gap_trade_migration_marks_old_breakout_oi_basis() -> None:
+    migrated = migrate_trade_payload(
+        {
+            "trade_id": "legacy",
+            "side": "BUY",
+            "option_type": "PUT",
+            "strike": 23350,
+            "security_id": "51347",
+            "lots": 1,
+            "lot_size": 65,
+            "quantity": 65,
+            "trade_capital": 10000.0,
+            "expiry_date": "2026-05-19",
+            "entry_price": 116.75,
+            "entry_reason": "Previous day low breakdown confirmed by option-chain OI: post-gap fresh OI delta confirmed",
+            "entry_spot_price": 23383.8,
+            "entry_trigger_price": 23610.3,
+            "entry_oi_strike": 23600,
+            "entry_oi_rule": "post-gap fresh OI delta confirmed CE 544375.00, PE -11310.00",
+            "current_price": 119.65,
+            "pnl": 188.5,
+            "mode": "paper",
+            "highest_price_seen": 129.0,
+            "stop_loss_price": 99.2375,
+            "target_price": 151.775,
+            "status": "CLOSED",
+            "opened_at": "2026-05-18T03:50:28.394571Z",
+            "closed_at": "2026-05-18T04:02:53.600829Z",
+        }
+    )
+
+    assert migrated["entry_oi_basis"] == "legacy_breakout"
+    assert migrated["entry_oi_reference_price"] == 23610.3
 
 
 def test_call_oi_confirmation_allows_trade_when_resistance_decreases() -> None:

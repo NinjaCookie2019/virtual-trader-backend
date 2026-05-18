@@ -1,6 +1,8 @@
 import unittest
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from app.core.config import Settings
 from app.services.dhan_gateway import DhanGateway
 
 
@@ -41,6 +43,11 @@ class StrikeLogicTests(unittest.TestCase):
     def test_extract_access_token_from_renew_response(self):
         self.assertEqual(DhanGateway.extract_access_token({"accessToken": " new-token "}), "new-token")
         self.assertEqual(DhanGateway.extract_access_token({"data": {"access_token": "nested-token"}}), "nested-token")
+
+    def test_dhan_epoch_dates_are_interpreted_in_app_timezone(self):
+        gateway = DhanGateway(Settings(app_timezone="Asia/Kolkata"))
+        timestamp = datetime(2026, 5, 15, 0, 0, tzinfo=ZoneInfo("Asia/Kolkata")).timestamp()
+        self.assertEqual(gateway._epoch_to_date(timestamp).isoformat(), "2026-05-15")
 
 
 if __name__ == "__main__":

@@ -432,8 +432,6 @@ class StrategyEngine:
             return
         if not self._is_trade_entry_window_open():
             return
-        if self._has_profitable_trade_today():
-            return
         if trades_today >= max_trades_per_day:
             return
         if last_signal_at and (self._now() - last_signal_at).total_seconds() < cooldown_seconds:
@@ -528,8 +526,6 @@ class StrategyEngine:
         if not is_enabled or reference_high is None or reference_low is None or has_open_position:
             return
         if not self._is_trade_entry_window_open():
-            return
-        if self._has_profitable_trade_today():
             return
         if trades_today >= max_trades_per_day:
             return
@@ -683,6 +679,8 @@ class StrategyEngine:
                 "post-gap fresh OI delta confirmed "
                 f"CE {ce_delta:.2f}, PE {pe_delta:.2f}"
             ),
+            basis=current.basis,
+            reference_price=current.reference_price,
         )
 
     def _opening_gap_premium_confirms(
@@ -777,9 +775,9 @@ class StrategyEngine:
             oi_signal = self.gateway.evaluate_oi_confirmation(
                 chain=chain,
                 option_type=option_type,
-                reference_price=spot_price if opening_gap_lock else trigger_price,
+                reference_price=spot_price,
                 strike_step=strike_step,
-                strike_basis="atm" if opening_gap_lock else "breakout",
+                strike_basis="atm",
             ) if oi_confirmation_enabled else None
             if opening_gap_lock and not self._opening_gap_oi_confirms(opening_gap_lock, oi_signal):
                 self._log_opening_gap_wait(
@@ -917,6 +915,8 @@ class StrategyEngine:
                     "entry_ce_change_oi": self.runtime.open_position.entry_ce_change_oi if self.runtime.open_position else None,
                     "entry_pe_change_oi": self.runtime.open_position.entry_pe_change_oi if self.runtime.open_position else None,
                     "entry_oi_rule": self.runtime.open_position.entry_oi_rule if self.runtime.open_position else None,
+                    "entry_oi_basis": self.runtime.open_position.entry_oi_basis if self.runtime.open_position else None,
+                    "entry_oi_reference_price": self.runtime.open_position.entry_oi_reference_price if self.runtime.open_position else None,
                     "stop_loss_price": self.runtime.open_position.stop_loss_price if self.runtime.open_position else None,
                     "target_price": self.runtime.open_position.target_price if self.runtime.open_position else None,
                 },
@@ -973,6 +973,8 @@ class StrategyEngine:
                     "entry_ce_change_oi": self.runtime.open_position.entry_ce_change_oi if self.runtime.open_position else None,
                     "entry_pe_change_oi": self.runtime.open_position.entry_pe_change_oi if self.runtime.open_position else None,
                     "entry_oi_rule": self.runtime.open_position.entry_oi_rule if self.runtime.open_position else None,
+                    "entry_oi_basis": self.runtime.open_position.entry_oi_basis if self.runtime.open_position else None,
+                    "entry_oi_reference_price": self.runtime.open_position.entry_oi_reference_price if self.runtime.open_position else None,
                     "stop_loss_price": self.runtime.open_position.stop_loss_price if self.runtime.open_position else None,
                     "target_price": self.runtime.open_position.target_price if self.runtime.open_position else None,
                 },
@@ -1429,6 +1431,8 @@ class StrategyEngine:
                     "CE resistance change OI decreasing "
                     f"from {previous.ce_change_oi:.2f} to {current.ce_change_oi:.2f}"
                 ),
+                basis=current.basis,
+                reference_price=current.reference_price,
             )
 
         if current.option_type == "PUT" and current.pe_change_oi < previous.pe_change_oi:
@@ -1442,6 +1446,8 @@ class StrategyEngine:
                     "PE support change OI decreasing "
                     f"from {previous.pe_change_oi:.2f} to {current.pe_change_oi:.2f}"
                 ),
+                basis=current.basis,
+                reference_price=current.reference_price,
             )
 
         return None
@@ -1560,6 +1566,8 @@ class StrategyEngine:
             entry_ce_change_oi=oi_signal.ce_change_oi if oi_signal else None,
             entry_pe_change_oi=oi_signal.pe_change_oi if oi_signal else None,
             entry_oi_rule=oi_signal.rule if oi_signal else None,
+            entry_oi_basis=oi_signal.basis if oi_signal else None,
+            entry_oi_reference_price=oi_signal.reference_price if oi_signal else None,
             entry_reference_high=reference_high,
             entry_reference_low=reference_low,
             current_price=fill_price,
@@ -1742,15 +1750,6 @@ class StrategyEngine:
             if event.details.get("option_type") == option_type:
                 return True
         return False
-
-    def _has_profitable_trade_today(self) -> bool:
-        session_date = self.runtime.session_date or self._today_session_date()
-        return any(
-            trade.status == "CLOSED"
-            and trade.pnl > 0
-            and self._trade_session_date(trade) == session_date
-            for trade in self.runtime.trade_history
-        )
 
     def _is_reset_trade_event(self, event: ActivityEvent, session_date: str, trade_id: str) -> bool:
         details = event.details or {}

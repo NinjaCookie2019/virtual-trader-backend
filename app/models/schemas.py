@@ -110,6 +110,8 @@ class PositionState(BaseModel):
     entry_ce_change_oi: float | None = None
     entry_pe_change_oi: float | None = None
     entry_oi_rule: str | None = None
+    entry_oi_basis: str | None = None
+    entry_oi_reference_price: float | None = None
     entry_reference_high: float | None = None
     entry_reference_low: float | None = None
     current_price: float

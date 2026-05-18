@@ -45,6 +45,8 @@ class OptionOiSignal:
     pe_change_oi: float
     confirmed: bool
     rule: str
+    basis: str = "breakout"
+    reference_price: float | None = None
 
 
 class DhanGateway:
@@ -136,9 +138,9 @@ class DhanGateway:
 
     def fetch_previous_day_levels(self) -> tuple[float, float, str]:
         client = self._ensure_client()
-        today = date.today()
-        from_date = (today - timedelta(days=14)).isoformat()
-        to_date = today.isoformat()
+        session_date = datetime.now(ZoneInfo(self.settings.app_timezone)).date()
+        from_date = (session_date - timedelta(days=21)).isoformat()
+        to_date = session_date.isoformat()
         response = client.historical_daily_data(
             security_id=self.settings.underlying_security_id,
             exchange_segment=self.settings.underlying_exchange_segment,
@@ -153,8 +155,17 @@ class DhanGateway:
         if not timestamps or not highs or not lows:
             raise DhanGatewayError(f"Historical data did not include usable candles: {response}")
 
-        candle_date = self._epoch_to_date_string(timestamps[-1])
-        return float(highs[-1]), float(lows[-1]), candle_date
+        candles: list[tuple[date, float, float]] = []
+        for timestamp, high, low in zip(timestamps, highs, lows):
+            candle_date = self._epoch_to_date(timestamp)
+            if candle_date < session_date:
+                candles.append((candle_date, float(high), float(low)))
+
+        if not candles:
+            raise DhanGatewayError(f"Historical data did not include a prior-session candle: {response}")
+
+        candle_date, high, low = candles[-1]
+        return high, low, candle_date.isoformat()
 
     def fetch_expiry_list(self) -> list[str]:
         client = self._ensure_client()
@@ -261,6 +272,8 @@ class DhanGateway:
             pe_change_oi=pe_change_oi,
             confirmed=confirmed,
             rule=rule,
+            basis=strike_basis,
+            reference_price=reference_price,
         )
 
     def get_strike_oi_change(self, chain: dict[str, Any], strike: int) -> dict[str, float | None]:
@@ -552,13 +565,12 @@ class DhanGateway:
             or leg.get("OI")
         )
 
-    @staticmethod
-    def _epoch_to_date_string(value: Any) -> str:
+    def _epoch_to_date(self, value: Any) -> date:
         try:
             epoch = float(value)
         except (TypeError, ValueError) as exc:
             raise DhanGatewayError(f"Unexpected timestamp value from historical data: {value}") from exc
-        return datetime.utcfromtimestamp(epoch).date().isoformat()
+        return datetime.fromtimestamp(epoch, ZoneInfo(self.settings.app_timezone)).date()
 
     @staticmethod
     def _unwrap_data_payload(response: dict[str, Any], context: str) -> Any:

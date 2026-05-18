@@ -24,7 +24,39 @@ def migrate_trade_payload(trade: dict) -> dict:
     migrated["pnl"] = (
         float(migrated.get("current_price", 0)) - float(migrated.get("entry_price", 0))
     ) * int(migrated["quantity"])
+    migrated.setdefault("entry_oi_basis", _infer_entry_oi_basis(migrated))
+    migrated.setdefault("entry_oi_reference_price", _infer_entry_oi_reference_price(migrated))
     return migrated
+
+
+def _nearest_strike(price: float, strike_step: int = 50) -> int:
+    return int((price / strike_step) + 0.5) * strike_step
+
+
+def _infer_entry_oi_basis(trade: dict) -> str | None:
+    if not trade.get("entry_oi_strike"):
+        return None
+    reason = f"{trade.get('entry_reason') or ''} {trade.get('entry_oi_rule') or ''}".lower()
+    spot_price = trade.get("entry_spot_price")
+    if spot_price is not None and "post-gap" in reason:
+        try:
+            if int(trade["entry_oi_strike"]) != _nearest_strike(float(spot_price)):
+                return "legacy_breakout"
+        except (TypeError, ValueError):
+            return "legacy_breakout"
+    return "breakout"
+
+
+def _infer_entry_oi_reference_price(trade: dict) -> float | None:
+    basis = trade.get("entry_oi_basis") or _infer_entry_oi_basis(trade)
+    if basis == "atm":
+        candidate = trade.get("entry_spot_price")
+    else:
+        candidate = trade.get("entry_trigger_price")
+    try:
+        return float(candidate) if candidate is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 class RuntimeStateStore:
