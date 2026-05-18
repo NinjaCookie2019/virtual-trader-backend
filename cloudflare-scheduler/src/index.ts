@@ -13,6 +13,7 @@ interface Env {
   SCHEDULER_SECRET?: string;
   FORCE_ACTION?: string;
   FORCE_ACTION_UNTIL_UTC?: string;
+  AUTO_STOP_AFTER_MARKET?: string;
 }
 
 interface SchedulerDecision {
@@ -85,7 +86,7 @@ function determineAction(now: Date, env: Env): SchedulerDecision {
     action = "renew";
   } else if (istMinutes >= 1530 && istMinutes <= 1539) {
     action = "renew";
-  } else if (istMinutes >= 1540 && istMinutes <= 1555) {
+  } else if (istMinutes >= 1540 && istMinutes <= 1555 && shouldAutoStopAfterMarket(env)) {
     action = "stop";
   }
 
@@ -94,6 +95,11 @@ function determineAction(now: Date, env: Env): SchedulerDecision {
     istMinutes,
     istTimestamp: formatIst(now),
   };
+}
+
+function shouldAutoStopAfterMarket(env: Env): boolean {
+  const value = env.AUTO_STOP_AFTER_MARKET?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
 }
 
 async function runScheduler(

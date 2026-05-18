@@ -9,8 +9,9 @@ Cloudflare cron expressions are UTC. This config uses weekday names to avoid num
 - `*/5 * * * *` runs every 5 minutes every day.
 - The Worker sends `start` only during `08:55` to `09:20` IST.
 - The Worker sends `renew` during `11:30` to `12:30` IST so 24-hour Dhan tokens are renewed before early-afternoon expiry.
-- The Worker also sends `renew` during `15:30` to `15:39` IST so the token is refreshed before shutdown when possible.
-- The Worker sends `stop` only during `15:40` to `15:55` IST.
+- The Worker also sends `renew` during `15:30` to `15:39` IST so the token stays fresh for post-market ledger access.
+- The Worker keeps Railway running after close by default so `/api/trades` and the ledger remain available.
+- Set `AUTO_STOP_AFTER_MARKET=true` only if you explicitly want the Worker to send `stop` during `15:40` to `15:55` IST.
 
 The Worker checks the actual IST time before sending an action. If Cloudflare fires outside the allowed windows, it returns a no-op and does not call the backend.
 During a renewal window, the Worker first reads backend state. If the token is already valid for more than 6 hours, renewal is skipped to avoid repeated Dhan calls. If Railway is asleep and no direct Railway API token is configured, the Worker dispatches the GitHub start workflow and retries renewal on the next cron tick.
@@ -25,6 +26,7 @@ Required for current deployment:
 Optional future direct mode:
 
 - `RAILWAY_API_TOKEN`: If set, the Worker calls Railway GraphQL directly and skips GitHub dispatch.
+- `AUTO_STOP_AFTER_MARKET`: Defaults to off. Set to `true` to stop Railway after market close.
 
 ## Manual Test
 
