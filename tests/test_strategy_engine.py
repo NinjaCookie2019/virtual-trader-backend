@@ -524,6 +524,34 @@ def test_opening_gap_oi_uses_fresh_delta_from_baseline_not_raw_bias() -> None:
     assert engine._opening_gap_oi_confirms(lock, fresh_bearish_build) is True
 
 
+def test_opening_gap_oi_does_not_compare_delta_across_different_strikes() -> None:
+    engine = build_engine()
+    lock = OpeningGapLock(
+        option_type="PUT",
+        trigger_price=90.0,
+        baseline_spot_price=88.0,
+        baseline_oi_signal=OptionOiSignal(
+            option_type="PUT",
+            strike=90,
+            ce_change_oi=2800000.0,
+            pe_change_oi=-600000.0,
+            confirmed=True,
+            rule="baseline",
+        ),
+    )
+    current = OptionOiSignal(
+        option_type="PUT",
+        strike=85,
+        ce_change_oi=1000.0,
+        pe_change_oi=5000.0,
+        confirmed=False,
+        rule="CE change OI > PE change OI",
+    )
+
+    assert engine._opening_gap_oi_confirms(lock, current) is False
+    assert engine._opening_gap_oi_signal(lock, current) is current
+
+
 def test_opening_gap_trade_confirms_oi_at_live_atm_not_old_breakout_level() -> None:
     engine = build_engine()
     engine.reference_levels.previous_day_high = 23839.30

@@ -654,6 +654,8 @@ class StrategyEngine:
             return True
         if lock.baseline_oi_signal is None or current is None:
             return False
+        if lock.baseline_oi_signal.strike != current.strike:
+            return current.confirmed
 
         ce_delta = current.ce_change_oi - lock.baseline_oi_signal.ce_change_oi
         pe_delta = current.pe_change_oi - lock.baseline_oi_signal.pe_change_oi
@@ -666,7 +668,7 @@ class StrategyEngine:
         lock: OpeningGapLock,
         current: OptionOiSignal,
     ) -> OptionOiSignal:
-        if lock.baseline_oi_signal is None:
+        if lock.baseline_oi_signal is None or lock.baseline_oi_signal.strike != current.strike:
             return current
 
         ce_delta = current.ce_change_oi - lock.baseline_oi_signal.ce_change_oi
