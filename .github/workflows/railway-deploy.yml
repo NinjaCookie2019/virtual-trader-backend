@@ -9,8 +9,9 @@ concurrency:
 
 env:
   BACKEND_URL: "https://virtual-trader-backend-production.up.railway.app"
-  RAILWAY_SERVICE: "virtual-trader-backend"
-  RAILWAY_ENVIRONMENT: "production"
+  RAILWAY_PROJECT_ID: "9f3a8e80-186b-464d-b46b-2d069b382e0d"
+  RAILWAY_SERVICE_ID: "0ca89c43-c5d4-4f38-a411-8d3fc2b52d54"
+  RAILWAY_ENVIRONMENT_ID: "4fad0b67-ebc5-4862-acdf-b90109bcf913"
 
 jobs:
   deploy:
@@ -20,45 +21,81 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli
-
-      - name: Validate Railway token
+      - name: Trigger Railway deployment
+        shell: bash
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
             echo "::error::Missing GitHub secret RAILWAY_TOKEN."
             exit 1
           fi
-          railway whoami
 
-      - name: Deploy backend
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          railway variables \
-            --service "$RAILWAY_SERVICE" \
-            --environment "$RAILWAY_ENVIRONMENT" \
-            --set "APP_COMMIT_SHA=$GITHUB_SHA" \
-            --skip-deploys
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
 
-          railway up \
-            --service "$RAILWAY_SERVICE" \
-            --environment "$RAILWAY_ENVIRONMENT" \
-            --detach
+          query = """
+          mutation($input: EnvironmentTriggersDeployInput!) {
+            environmentTriggersDeploy(input: $input)
+          }
+          """
+          variables = {
+              "input": {
+                  "projectId": os.environ["RAILWAY_PROJECT_ID"],
+                  "environmentId": os.environ["RAILWAY_ENVIRONMENT_ID"],
+                  "serviceId": os.environ["RAILWAY_SERVICE_ID"],
+              }
+          }
+          request = urllib.request.Request(
+              "https://backboard.railway.com/graphql/v2",
+              data=json.dumps({"query": query, "variables": variables}).encode(),
+              headers={
+                  "Authorization": f"Bearer {os.environ['RAILWAY_API_TOKEN']}",
+                  "Content-Type": "application/json",
+                  "User-Agent": "virtual-trader-railway-deploy/1.0",
+              },
+              method="POST",
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              payload = json.load(response)
+          if payload.get("errors"):
+              raise SystemExit(payload["errors"])
+          print(json.dumps(payload, indent=2))
+          PY
 
-      - name: Verify deployed commit
+      - name: Verify deployed config
         run: |
           for attempt in {1..30}; do
-            body="$(curl -fsS --max-time 10 "$BACKEND_URL/api/version" || true)"
-            echo "$body"
-            if [[ "$body" == *"$GITHUB_SHA"* ]]; then
-              echo "Verified deployed commit $GITHUB_SHA"
+            if ! curl -fsS --max-time 10 "$BACKEND_URL/api/state" -o state.json; then
+              sleep 10
+              continue
+            fi
+            python -m json.tool state.json >/dev/null
+
+            if python - <<'PY'
+          import json
+
+          with open("state.json", "r", encoding="utf-8") as handle:
+              payload = json.load(handle)
+
+          config = payload.get("config") or {}
+          if (
+              config.get("gap_open_option_premium_min_move_percent") == 6.0
+              and config.get("oi_confirmation_min_edge_change_oi") == 500000.0
+              and config.get("oi_confirmation_min_edge_percent") == 10.0
+          ):
+              raise SystemExit(0)
+          raise SystemExit(1)
+          PY
+            then
+              echo "Verified deployed config."
               exit 0
             fi
+
             sleep 10
           done
 
-          echo "::error::Backend did not report deployed commit $GITHUB_SHA."
+          echo "::error::Backend did not report deployed config."
           exit 1
