@@ -12,6 +12,8 @@ env:
   RAILWAY_PROJECT_ID: "9f3a8e80-186b-464d-b46b-2d069b382e0d"
   RAILWAY_SERVICE_ID: "0ca89c43-c5d4-4f38-a411-8d3fc2b52d54"
   RAILWAY_ENVIRONMENT_ID: "4fad0b67-ebc5-4862-acdf-b90109bcf913"
+  RAILWAY_SERVICE: "virtual-trader-backend"
+  RAILWAY_ENVIRONMENT: "production"
 
 jobs:
   deploy:
@@ -21,51 +23,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Trigger Railway deployment
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Upload Railway deployment
         shell: bash
         env:
-          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          if [ -z "${RAILWAY_API_TOKEN:-}" ]; then
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then
             echo "::error::Missing GitHub secret RAILWAY_TOKEN."
             exit 1
           fi
 
-          python - <<'PY'
-          import json
-          import os
-          import urllib.request
-
-          query = """
-          mutation($serviceId: String!, $environmentId: String!, $commitSha: String!) {
-            serviceInstanceDeployV2(
-              serviceId: $serviceId,
-              environmentId: $environmentId,
-              commitSha: $commitSha
-            )
-          }
-          """
-          variables = {
-              "environmentId": os.environ["RAILWAY_ENVIRONMENT_ID"],
-              "serviceId": os.environ["RAILWAY_SERVICE_ID"],
-              "commitSha": os.environ["GITHUB_SHA"],
-          }
-          request = urllib.request.Request(
-              "https://backboard.railway.com/graphql/v2",
-              data=json.dumps({"query": query, "variables": variables}).encode(),
-              headers={
-                  "Authorization": f"Bearer {os.environ['RAILWAY_API_TOKEN']}",
-                  "Content-Type": "application/json",
-                  "User-Agent": "virtual-trader-railway-deploy/1.0",
-              },
-              method="POST",
-          )
-          with urllib.request.urlopen(request, timeout=30) as response:
-              payload = json.load(response)
-          if payload.get("errors"):
-              raise SystemExit(payload["errors"])
-          print(json.dumps(payload, indent=2))
-          PY
+          railway up \
+            --service "$RAILWAY_SERVICE" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --detach
 
       - name: Verify deployed config
         run: |
