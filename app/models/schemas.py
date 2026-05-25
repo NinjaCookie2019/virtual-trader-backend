@@ -30,9 +30,11 @@ class StrategyConfig(BaseModel):
     breakout_confirmation_seconds: float = 30.0
     second_trade_extra_buffer: float = 15.0
     oi_confirmation_enabled: bool = True
+    oi_confirmation_min_edge_change_oi: float = 500000.0
+    oi_confirmation_min_edge_percent: float = 10.0
     gap_open_filter_enabled: bool = True
     gap_open_continuation_points: float = 15.0
-    gap_open_option_premium_min_move_percent: float = 3.0
+    gap_open_option_premium_min_move_percent: float = 6.0
     max_trades_per_day: int = 2
     cooldown_seconds: int = 120
     no_trade_before_time: str = "09:20"
@@ -183,6 +185,8 @@ class ConfigUpdateRequest(BaseModel):
     breakout_confirmation_seconds: float | None = None
     second_trade_extra_buffer: float | None = None
     oi_confirmation_enabled: bool | None = None
+    oi_confirmation_min_edge_change_oi: float | None = None
+    oi_confirmation_min_edge_percent: float | None = None
     gap_open_filter_enabled: bool | None = None
     gap_open_continuation_points: float | None = None
     gap_open_option_premium_min_move_percent: float | None = None

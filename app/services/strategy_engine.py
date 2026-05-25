@@ -73,6 +73,8 @@ class StrategyEngine:
             product_type=settings.default_product_type,
             strike_step=settings.strike_step,
             oi_confirmation_enabled=settings.default_oi_confirmation_enabled,
+            oi_confirmation_min_edge_change_oi=settings.default_oi_confirmation_min_edge_change_oi,
+            oi_confirmation_min_edge_percent=settings.default_oi_confirmation_min_edge_percent,
             gap_open_filter_enabled=settings.default_gap_open_filter_enabled,
             gap_open_continuation_points=settings.default_gap_open_continuation_points,
             gap_open_option_premium_min_move_percent=settings.default_gap_open_option_premium_min_move_percent,
@@ -726,6 +728,7 @@ class StrategyEngine:
                 strike_step=strike_step,
                 strike_basis="atm",
             ) if oi_confirmation_enabled else None
+            oi_signal = self._apply_oi_edge_filter(oi_signal)
             contract = self.gateway.resolve_contract_from_chain(
                 chain=chain,
                 spot_price=spot_price,
@@ -795,6 +798,8 @@ class StrategyEngine:
     ) -> bool:
         with self.lock:
             oi_confirmation_enabled = self.config.oi_confirmation_enabled
+            min_edge_change_oi = max(self.config.oi_confirmation_min_edge_change_oi, 0.0)
+            min_edge_percent = max(self.config.oi_confirmation_min_edge_percent, 0.0)
         if not oi_confirmation_enabled:
             return True
         if lock.baseline_oi_signal is None or current is None:
@@ -804,9 +809,45 @@ class StrategyEngine:
 
         ce_delta = current.ce_change_oi - lock.baseline_oi_signal.ce_change_oi
         pe_delta = current.pe_change_oi - lock.baseline_oi_signal.pe_change_oi
+        edge = pe_delta - ce_delta if lock.option_type == "CALL" else ce_delta - pe_delta
+        edge_percent = self._oi_edge_percent(ce_delta, pe_delta, edge)
         if lock.option_type == "CALL":
-            return pe_delta > ce_delta and pe_delta > 0
-        return ce_delta > pe_delta and ce_delta > 0
+            return pe_delta > 0 and edge >= min_edge_change_oi and edge_percent >= min_edge_percent
+        return ce_delta > 0 and edge >= min_edge_change_oi and edge_percent >= min_edge_percent
+
+    def _apply_oi_edge_filter(self, signal: OptionOiSignal | None) -> OptionOiSignal | None:
+        if signal is None:
+            return None
+        with self.lock:
+            min_edge_change_oi = max(self.config.oi_confirmation_min_edge_change_oi, 0.0)
+            min_edge_percent = max(self.config.oi_confirmation_min_edge_percent, 0.0)
+
+        edge = (
+            signal.pe_change_oi - signal.ce_change_oi
+            if signal.option_type == "CALL"
+            else signal.ce_change_oi - signal.pe_change_oi
+        )
+        edge_percent = self._oi_edge_percent(signal.ce_change_oi, signal.pe_change_oi, edge)
+        confirmed = signal.confirmed and edge >= min_edge_change_oi and edge_percent >= min_edge_percent
+        rule = (
+            f"{signal.rule}; edge {edge:.2f} ({edge_percent:.2f}%) "
+            f"must be >= {min_edge_change_oi:.2f} and >= {min_edge_percent:.2f}%"
+        )
+        return OptionOiSignal(
+            option_type=signal.option_type,
+            strike=signal.strike,
+            ce_change_oi=signal.ce_change_oi,
+            pe_change_oi=signal.pe_change_oi,
+            confirmed=confirmed,
+            rule=rule,
+            basis=signal.basis,
+            reference_price=signal.reference_price,
+        )
+
+    @staticmethod
+    def _oi_edge_percent(ce_change_oi: float, pe_change_oi: float, edge: float) -> float:
+        base = max(abs(ce_change_oi), abs(pe_change_oi), 1.0)
+        return (edge / base) * 100
 
     def _opening_gap_oi_signal(
         self,
@@ -928,6 +969,7 @@ class StrategyEngine:
                 strike_step=strike_step,
                 strike_basis="atm",
             ) if oi_confirmation_enabled else None
+            oi_signal = self._apply_oi_edge_filter(oi_signal)
             if opening_gap_lock and not self._opening_gap_oi_confirms(opening_gap_lock, oi_signal):
                 self._log_opening_gap_wait(
                     opening_gap_lock,
@@ -1992,9 +2034,17 @@ class StrategyEngine:
         normalized.strike_step = max(normalized.strike_step, 50)
         normalized.max_trades_per_day = max(normalized.max_trades_per_day, 1)
         normalized.cooldown_seconds = max(normalized.cooldown_seconds, 0)
+        normalized.oi_confirmation_min_edge_change_oi = min(
+            max(normalized.oi_confirmation_min_edge_change_oi, 0.0),
+            5000000.0,
+        )
+        normalized.oi_confirmation_min_edge_percent = min(
+            max(normalized.oi_confirmation_min_edge_percent, 0.0),
+            100.0,
+        )
         normalized.gap_open_continuation_points = max(normalized.gap_open_continuation_points, 0.0)
         normalized.gap_open_option_premium_min_move_percent = min(
-            max(normalized.gap_open_option_premium_min_move_percent, 0.0),
+            max(normalized.gap_open_option_premium_min_move_percent, 6.0),
             25.0,
         )
         normalized.auto_close_time = normalized.auto_close_time or self.settings.default_auto_close_time

@@ -46,9 +46,11 @@ class Settings(BaseSettings):
     default_second_trade_extra_buffer: float = 15.0
     default_no_trade_before_time: str = "09:20"
     default_oi_confirmation_enabled: bool = True
+    default_oi_confirmation_min_edge_change_oi: float = 500000.0
+    default_oi_confirmation_min_edge_percent: float = 10.0
     default_gap_open_filter_enabled: bool = True
     default_gap_open_continuation_points: float = 15.0
-    default_gap_open_option_premium_min_move_percent: float = 3.0
+    default_gap_open_option_premium_min_move_percent: float = 6.0
     default_stop_loss_percent: float = 15.0
     default_target_percent: float = 30.0
     default_trailing_stop_enabled: bool = True

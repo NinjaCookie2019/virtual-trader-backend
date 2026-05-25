@@ -266,6 +266,31 @@ def test_gap_up_lock_clears_after_spot_reclaims_trigger() -> None:
     assert triggered == [("CALL", 101.0)]
 
 
+def test_opening_gap_premium_requires_strong_follow_through() -> None:
+    engine = build_engine()
+    lock = OpeningGapLock(
+        option_type="CALL",
+        trigger_price=23850.65,
+        baseline_spot_price=23967.60,
+        baseline_option_strike=24000,
+        baseline_option_price=98.00,
+    )
+    contract = OptionContract(
+        option_type="CALL",
+        strike=24000,
+        security_id="72179",
+        exchange_segment="NSE_FNO",
+        expiry_date="2026-05-26",
+        last_price=102.45,
+        top_bid_price=102.30,
+        top_ask_price=102.45,
+    )
+
+    assert engine.config.gap_open_option_premium_min_move_percent == 6.0
+    assert engine._opening_gap_premium_confirms(lock, contract, 102.45) is False
+    assert engine._opening_gap_premium_confirms(lock, contract, 103.89) is True
+
+
 def test_capital_sizing_takes_one_lot_when_trade_budget_is_too_small_but_equity_allows() -> None:
     engine = build_engine()
     engine.config.capital_sizing_enabled = True
@@ -650,7 +675,7 @@ def test_opening_gap_oi_uses_fresh_delta_from_baseline_not_raw_bias() -> None:
     fresh_bearish_build = OptionOiSignal(
         option_type="PUT",
         strike=90,
-        ce_change_oi=2850000.0,
+        ce_change_oi=3400000.0,
         pe_change_oi=-650000.0,
         confirmed=True,
         rule="CE change OI > PE change OI",
@@ -820,8 +845,8 @@ def test_normal_breakout_trade_confirms_oi_at_live_atm() -> None:
             return OptionOiSignal(
                 option_type="CALL",
                 strike=100,
-                ce_change_oi=10.0,
-                pe_change_oi=20.0,
+                ce_change_oi=1000000.0,
+                pe_change_oi=1600000.0,
                 confirmed=True,
                 rule="PE change OI > CE change OI",
                 basis=strike_basis,
@@ -948,6 +973,26 @@ def test_weak_oi_confirmation_waits_instead_of_trading_on_resistance_decrease() 
     assert calls == []
     assert engine.runtime.open_position is None
     assert "CALL" in engine.pending_oi_breakouts
+
+
+def test_minor_call_put_oi_gap_is_not_clean_confirmation() -> None:
+    engine = build_engine()
+    signal = OptionOiSignal(
+        option_type="CALL",
+        strike=24000,
+        ce_change_oi=5837585.0,
+        pe_change_oi=6001190.0,
+        confirmed=True,
+        rule="PE change OI > CE change OI",
+        basis="atm",
+        reference_price=23983.05,
+    )
+
+    filtered = engine._apply_oi_edge_filter(signal)
+
+    assert filtered is not None
+    assert filtered.confirmed is False
+    assert "edge 163605.00 (2.73%)" in filtered.rule
 
 
 def test_token_renewal_reports_auth_failure_without_renew_attempt() -> None:
