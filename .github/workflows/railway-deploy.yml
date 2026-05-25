@@ -1,0 +1,64 @@
+name: Railway Deploy
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: railway-deploy
+  cancel-in-progress: false
+
+env:
+  BACKEND_URL: "https://virtual-trader-backend-production.up.railway.app"
+  RAILWAY_SERVICE: "virtual-trader-backend"
+  RAILWAY_ENVIRONMENT: "production"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Validate Railway token
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+            echo "::error::Missing GitHub secret RAILWAY_TOKEN."
+            exit 1
+          fi
+          railway whoami
+
+      - name: Deploy backend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway variables \
+            --service "$RAILWAY_SERVICE" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --set "APP_COMMIT_SHA=$GITHUB_SHA" \
+            --skip-deploys
+
+          railway up \
+            --service "$RAILWAY_SERVICE" \
+            --environment "$RAILWAY_ENVIRONMENT" \
+            --detach
+
+      - name: Verify deployed commit
+        run: |
+          for attempt in {1..30}; do
+            body="$(curl -fsS --max-time 10 "$BACKEND_URL/api/version" || true)"
+            echo "$body"
+            if [[ "$body" == *"$GITHUB_SHA"* ]]; then
+              echo "Verified deployed commit $GITHUB_SHA"
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo "::error::Backend did not report deployed commit $GITHUB_SHA."
+          exit 1
