@@ -37,16 +37,18 @@ jobs:
           import urllib.request
 
           query = """
-          mutation($input: EnvironmentTriggersDeployInput!) {
-            environmentTriggersDeploy(input: $input)
+          mutation($serviceId: String!, $environmentId: String!, $commitSha: String!) {
+            serviceInstanceDeployV2(
+              serviceId: $serviceId,
+              environmentId: $environmentId,
+              commitSha: $commitSha
+            )
           }
           """
           variables = {
-              "input": {
-                  "projectId": os.environ["RAILWAY_PROJECT_ID"],
-                  "environmentId": os.environ["RAILWAY_ENVIRONMENT_ID"],
-                  "serviceId": os.environ["RAILWAY_SERVICE_ID"],
-              }
+              "environmentId": os.environ["RAILWAY_ENVIRONMENT_ID"],
+              "serviceId": os.environ["RAILWAY_SERVICE_ID"],
+              "commitSha": os.environ["GITHUB_SHA"],
           }
           request = urllib.request.Request(
               "https://backboard.railway.com/graphql/v2",
