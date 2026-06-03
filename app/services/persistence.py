@@ -104,6 +104,8 @@ class RuntimeStateStore:
         migrated.setdefault("second_trade_extra_buffer", 15.0)
         migrated.setdefault("gap_open_continuation_points", 15.0)
         migrated.setdefault("gap_open_option_premium_min_move_percent", 6.0)
+        migrated.setdefault("daily_profit_lock_enabled", True)
+        migrated.setdefault("daily_profit_lock_amount", 1000.0)
         migrated.setdefault("account_capital", 20000.0)
         migrated.setdefault("trade_capital", 10000.0)
         migrated.setdefault("lots", 1)

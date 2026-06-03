@@ -125,7 +125,22 @@ def test_stop_loss_today_blocks_new_entries() -> None:
     assert engine.events[-1].title == "Daily Kill Switch"
 
 
-def test_profitable_first_trade_uses_stricter_second_breakout_trigger() -> None:
+def test_profit_lock_blocks_new_entries_after_daily_threshold() -> None:
+    engine = build_engine()
+    engine.config.daily_profit_lock_enabled = True
+    engine.config.daily_profit_lock_amount = 1000.0
+    engine.runtime.trade_history.append(make_closed_trade(engine, pnl=1200.0, exit_reason="target"))
+    engine.runtime.trades_today = 1
+    triggered: list[tuple[str, float]] = []
+    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+
+    engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
+
+    assert triggered == []
+    assert engine.events[-1].title == "Daily Profit Locked"
+
+
+def test_profitable_first_trade_below_lock_uses_stricter_second_breakout_trigger() -> None:
     engine = build_engine()
     engine.config.second_trade_extra_buffer = 10.0
     engine.runtime.trade_history.append(make_closed_trade(engine, pnl=325.0, exit_reason="target"))
@@ -408,7 +423,7 @@ def test_restart_hydrates_today_call_breakout_lock_from_trade_history() -> None:
     assert triggered == []
 
 
-def test_profitable_trade_today_can_retry_when_daily_cap_allows() -> None:
+def test_profitable_trade_below_lock_can_retry_when_daily_cap_allows() -> None:
     engine = build_engine()
     contract = OptionContract(
         option_type="CALL",

@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     default_gap_open_filter_enabled: bool = True
     default_gap_open_continuation_points: float = 15.0
     default_gap_open_option_premium_min_move_percent: float = 6.0
+    default_daily_profit_lock_enabled: bool = True
+    default_daily_profit_lock_amount: float = 1000.0
     default_stop_loss_percent: float = 15.0
     default_target_percent: float = 30.0
     default_trailing_stop_enabled: bool = True

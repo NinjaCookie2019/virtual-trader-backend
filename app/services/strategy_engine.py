@@ -78,6 +78,8 @@ class StrategyEngine:
             gap_open_filter_enabled=settings.default_gap_open_filter_enabled,
             gap_open_continuation_points=settings.default_gap_open_continuation_points,
             gap_open_option_premium_min_move_percent=settings.default_gap_open_option_premium_min_move_percent,
+            daily_profit_lock_enabled=settings.default_daily_profit_lock_enabled,
+            daily_profit_lock_amount=settings.default_daily_profit_lock_amount,
             max_trades_per_day=settings.default_max_trades_per_day,
             cooldown_seconds=settings.default_cooldown_seconds,
             breakout_buffer=settings.default_breakout_buffer,
@@ -707,6 +709,27 @@ class StrategyEngine:
                     "Daily Kill Switch",
                     "New entry blocked because a stop-loss was already hit today.",
                     {"option_type": option_type, "spot_price": spot_price, "trigger_price": trigger_price},
+                )
+                self._persist_and_emit()
+                return False
+
+            realized_pnl = sum(trade.pnl for trade in todays_closed_trades)
+            if self.config.daily_profit_lock_enabled and realized_pnl >= self.config.daily_profit_lock_amount:
+                self._log(
+                    "warn",
+                    "Daily Profit Locked",
+                    (
+                        "New entry blocked because today's closed P&L "
+                        f"{realized_pnl:.2f} reached the profit lock "
+                        f"{self.config.daily_profit_lock_amount:.2f}."
+                    ),
+                    {
+                        "option_type": option_type,
+                        "spot_price": spot_price,
+                        "trigger_price": trigger_price,
+                        "realized_pnl": realized_pnl,
+                        "daily_profit_lock_amount": self.config.daily_profit_lock_amount,
+                    },
                 )
                 self._persist_and_emit()
                 return False
@@ -2060,6 +2083,7 @@ class StrategyEngine:
         normalized.time_decay_min_profit_percent = min(max(normalized.time_decay_min_profit_percent, 1.0), 25.0)
         normalized.reclaim_exit_buffer = min(max(normalized.reclaim_exit_buffer, 0.0), 100.0)
         normalized.account_capital = max(normalized.account_capital, 1.0)
+        normalized.daily_profit_lock_amount = min(max(normalized.daily_profit_lock_amount, 0.0), normalized.account_capital)
         normalized.trade_capital = min(max(normalized.trade_capital, 1.0), normalized.account_capital)
         normalized.lots = max(normalized.lots, 1)
         normalized.lot_size = max(normalized.lot_size, 1)

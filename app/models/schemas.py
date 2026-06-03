@@ -35,6 +35,8 @@ class StrategyConfig(BaseModel):
     gap_open_filter_enabled: bool = True
     gap_open_continuation_points: float = 15.0
     gap_open_option_premium_min_move_percent: float = 6.0
+    daily_profit_lock_enabled: bool = True
+    daily_profit_lock_amount: float = 1000.0
     max_trades_per_day: int = 2
     cooldown_seconds: int = 120
     no_trade_before_time: str = "09:20"
@@ -190,6 +192,8 @@ class ConfigUpdateRequest(BaseModel):
     gap_open_filter_enabled: bool | None = None
     gap_open_continuation_points: float | None = None
     gap_open_option_premium_min_move_percent: float | None = None
+    daily_profit_lock_enabled: bool | None = None
+    daily_profit_lock_amount: float | None = None
     max_trades_per_day: int | None = None
     cooldown_seconds: int | None = None
     no_trade_before_time: str | None = None
