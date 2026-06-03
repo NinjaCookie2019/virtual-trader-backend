@@ -890,6 +890,106 @@ def test_normal_breakout_trade_confirms_oi_at_live_atm() -> None:
     assert engine.runtime.open_position.entry_oi_reference_price == 101.2
 
 
+def test_trade_resolution_refreshes_stale_expiry_and_retries_option_chain() -> None:
+    engine = build_engine()
+    engine.reference_levels.expiry_date = "2026-04-21"
+
+    class FakeGateway:
+        def __init__(self) -> None:
+            self.option_chain_calls: list[str] = []
+
+        def fetch_expiry_list(self) -> list[str]:
+            return ["2026-06-04"]
+
+        def fetch_option_chain(self, expiry_date: str) -> dict:
+            self.option_chain_calls.append(expiry_date)
+            if expiry_date == "2026-04-21":
+                raise DhanGatewayError("Dhan option chain request failed (811): Invalid Expiry Date")
+            return {"oc": {}}
+
+        def evaluate_oi_confirmation(
+            self,
+            *,
+            chain: dict,
+            option_type: str,
+            reference_price: float,
+            strike_step: int,
+            strike_basis: str = "breakout",
+        ) -> OptionOiSignal:
+            return OptionOiSignal(
+                option_type=option_type,
+                strike=100,
+                ce_change_oi=1000000.0,
+                pe_change_oi=2000000.0,
+                confirmed=True,
+                rule="PE change OI > CE change OI",
+                basis=strike_basis,
+                reference_price=reference_price,
+            )
+
+        def resolve_contract_from_chain(self, **kwargs) -> OptionContract:
+            return OptionContract(
+                option_type=kwargs["option_type"],
+                strike=150,
+                security_id="test-call",
+                exchange_segment="NSE_FNO",
+                expiry_date=kwargs["expiry_date"],
+                last_price=10.0,
+                top_bid_price=9.9,
+                top_ask_price=10.0,
+            )
+
+    fake_gateway = FakeGateway()
+    engine.gateway = fake_gateway  # type: ignore[assignment]
+
+    engine._trigger_trade("CALL", 101.0)
+
+    assert fake_gateway.option_chain_calls == ["2026-04-21", "2026-06-04"]
+    assert engine.reference_levels.expiry_date == "2026-06-04"
+    assert engine.runtime.open_position is not None
+    assert engine.runtime.open_position.expiry_date == "2026-06-04"
+    assert any(event.title == "Expiry Refreshed" for event in engine.events)
+
+
+def test_option_chain_oi_endpoint_refreshes_stale_expiry_and_retries() -> None:
+    engine = build_engine()
+    engine.reference_levels.expiry_date = "2026-04-21"
+
+    class FakeGateway:
+        def __init__(self) -> None:
+            self.option_chain_calls: list[str] = []
+
+        def fetch_expiry_list(self) -> list[str]:
+            return ["2026-06-04"]
+
+        def fetch_option_chain(self, expiry_date: str) -> dict:
+            self.option_chain_calls.append(expiry_date)
+            if expiry_date == "2026-04-21":
+                raise DhanGatewayError("Dhan option chain request failed (811): Invalid Expiry Date")
+            return {"oc": {"100.000000": {}}}
+
+        def get_strike_oi_change(self, chain: dict, strike: int) -> dict[str, float | None]:
+            return {
+                "ce_change_oi": 1000.0,
+                "pe_change_oi": 2000.0,
+                "ce_last_price": 10.0,
+                "pe_last_price": 11.0,
+                "ce_oi": 10000.0,
+                "pe_oi": 12000.0,
+            }
+
+    fake_gateway = FakeGateway()
+    engine.gateway = fake_gateway  # type: ignore[assignment]
+
+    changes = engine.get_option_chain_oi_changes([100])
+
+    assert fake_gateway.option_chain_calls == ["2026-04-21", "2026-06-04"]
+    assert engine.reference_levels.expiry_date == "2026-06-04"
+    assert changes[0].expiry_date == "2026-06-04"
+    assert changes[0].ce_change_oi == 1000.0
+    assert changes[0].pe_change_oi == 2000.0
+
+
 def test_legacy_gap_trade_migration_marks_old_breakout_oi_basis() -> None:
     migrated = migrate_trade_payload(
         {

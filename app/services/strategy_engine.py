@@ -188,7 +188,7 @@ class StrategyEngine:
         if not expiry_date:
             expiry_date = self.gateway.fetch_expiry_list()[0]
 
-        chain = self.gateway.fetch_option_chain(expiry_date)
+        chain, expiry_date = self._fetch_option_chain_with_expiry_refresh(expiry_date)
         updated_at = self._now()
         changes: list[OptionChainOiChange] = []
         for strike in strikes:
@@ -207,6 +207,38 @@ class StrategyEngine:
                 )
             )
         return changes
+
+    def _fetch_option_chain_with_expiry_refresh(self, expiry_date: str) -> tuple[dict[str, object], str]:
+        try:
+            return self.gateway.fetch_option_chain(expiry_date), expiry_date
+        except DhanGatewayError as exc:
+            if not self._is_invalid_expiry_error(exc):
+                raise
+
+            refreshed_expiry = self.gateway.fetch_expiry_list()[0]
+            with self.lock:
+                self.reference_levels.expiry_date = refreshed_expiry
+                self.reference_levels.updated_at = self._now()
+                self.connections.last_error = None
+                self._log(
+                    "warn",
+                    "Expiry Refreshed",
+                    (
+                        f"Dhan rejected stale expiry {expiry_date}; "
+                        f"retrying option chain with {refreshed_expiry}."
+                    ),
+                    {
+                        "old_expiry_date": expiry_date,
+                        "expiry_date": refreshed_expiry,
+                    },
+                )
+                self._persist_and_emit()
+            return self.gateway.fetch_option_chain(refreshed_expiry), refreshed_expiry
+
+    @staticmethod
+    def _is_invalid_expiry_error(exc: DhanGatewayError) -> bool:
+        message = str(exc).lower()
+        return "invalid expiry" in message or ("invalid" in message and "expiry date" in message)
 
     def update_config(self, payload: ConfigUpdateRequest) -> StrategySnapshot:
         with self.lock:
@@ -720,7 +752,7 @@ class StrategyEngine:
             return
 
         try:
-            chain = self.gateway.fetch_option_chain(expiry_date)
+            chain, expiry_date = self._fetch_option_chain_with_expiry_refresh(expiry_date)
             oi_signal = self.gateway.evaluate_oi_confirmation(
                 chain=chain,
                 option_type=option_type,
@@ -961,7 +993,7 @@ class StrategyEngine:
             return
 
         try:
-            chain = self.gateway.fetch_option_chain(expiry_date)
+            chain, expiry_date = self._fetch_option_chain_with_expiry_refresh(expiry_date)
             oi_signal = self.gateway.evaluate_oi_confirmation(
                 chain=chain,
                 option_type=option_type,
