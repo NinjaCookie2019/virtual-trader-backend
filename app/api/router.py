@@ -134,6 +134,14 @@ def build_router(engine: StrategyEngine, broadcaster: StateBroadcaster) -> APIRo
         require_admin_access(request, authorization)
         return engine.renew_token_now()
 
+    @router.post("/admin/refresh-reference-levels")
+    def refresh_reference_levels(
+        request: Request,
+        authorization: str | None = Header(default=None),
+    ):
+        require_admin_access(request, authorization)
+        return engine.refresh_reference_levels()
+
     @router.websocket("/ws/state")
     async def state_socket(socket: WebSocket) -> None:
         await broadcaster.connect(socket)

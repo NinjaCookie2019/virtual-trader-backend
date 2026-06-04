@@ -94,6 +94,67 @@ def test_price_breakout_requires_sustained_ticks_before_trade() -> None:
     assert "CALL" not in engine.pending_price_breakouts
 
 
+def test_reference_refresh_due_when_same_session_source_date_is_stale() -> None:
+    engine = build_engine()
+    engine._today_session_date = lambda: "2026-06-04"  # type: ignore[method-assign]
+    engine.runtime.session_date = "2026-06-04"
+    engine.reference_levels.source_date = "2026-06-02"
+    engine.last_reference_refresh_attempt_at = None
+
+    assert engine._reference_refresh_due(engine.runtime.session_date) is True
+
+
+def test_reference_refresh_not_due_when_source_date_matches_previous_weekday() -> None:
+    engine = build_engine()
+    engine._today_session_date = lambda: "2026-06-04"  # type: ignore[method-assign]
+    engine.runtime.session_date = "2026-06-04"
+    engine.reference_levels.source_date = "2026-06-03"
+    engine.last_reference_refresh_attempt_at = None
+
+    assert engine._reference_refresh_due(engine.runtime.session_date) is False
+
+
+def test_reference_refresh_due_honors_retry_throttle() -> None:
+    engine = build_engine()
+    engine._today_session_date = lambda: "2026-06-04"  # type: ignore[method-assign]
+    engine.runtime.session_date = "2026-06-04"
+    engine.reference_levels.source_date = "2026-06-02"
+    engine.last_reference_refresh_attempt_at = engine._now()
+
+    assert engine._reference_refresh_due(engine.runtime.session_date) is False
+
+    engine.last_reference_refresh_attempt_at = engine._now() - timedelta(
+        seconds=engine.settings.reference_level_retry_seconds + 1
+    )
+
+    assert engine._reference_refresh_due(engine.runtime.session_date) is True
+
+
+def test_refresh_reference_levels_warns_when_dhan_returns_stale_source_date() -> None:
+    engine = build_engine()
+    engine._today_session_date = lambda: "2026-06-04"  # type: ignore[method-assign]
+
+    class FakeGateway:
+        def fetch_previous_day_levels(self):
+            return 23556.95, 23229.15, "2026-06-02"
+
+        def fetch_expiry_list(self):
+            return ["2026-06-09"]
+
+    engine.gateway = FakeGateway()  # type: ignore[assignment]
+
+    engine.refresh_reference_levels()
+
+    assert engine.reference_levels.source_date == "2026-06-02"
+    stale_events = [event for event in engine.events if event.title == "Reference Levels Stale"]
+    assert stale_events
+    assert stale_events[-1].details == {
+        "source_date": "2026-06-02",
+        "expected_source_date": "2026-06-03",
+        "session_date": "2026-06-04",
+    }
+
+
 def test_price_breakout_confirmation_resets_when_spot_reclaims_trigger() -> None:
     engine = build_engine()
     engine.config.breakout_confirmation_ticks = 2

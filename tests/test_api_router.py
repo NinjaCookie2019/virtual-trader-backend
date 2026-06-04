@@ -91,3 +91,29 @@ def test_trade_endpoint_migrates_legacy_gap_oi_basis() -> None:
     trade = response.json()["trades"][0]
     assert trade["entry_oi_basis"] == "legacy_breakout"
     assert trade["entry_oi_reference_price"] == 23610.3
+
+
+def test_admin_refresh_reference_levels_endpoint_requires_admin_and_calls_engine() -> None:
+    engine = build_engine()
+    engine.settings.admin_api_key = "secret"
+    called = {"count": 0}
+
+    def refresh_reference_levels():
+        called["count"] += 1
+        return engine.get_snapshot()
+
+    engine.refresh_reference_levels = refresh_reference_levels  # type: ignore[method-assign]
+    app = FastAPI()
+    attach_routes(app, engine, StateBroadcaster())
+    client = TestClient(app)
+
+    forbidden = client.post("/api/admin/refresh-reference-levels")
+    assert forbidden.status_code == 403
+
+    response = client.post(
+        "/api/admin/refresh-reference-levels",
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    assert response.status_code == 200
+    assert called["count"] == 1

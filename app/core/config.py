@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     strike_step: int = 50
     option_chain_poll_seconds: float = 3.2
     option_quote_poll_seconds: float = 2.0
+    reference_level_retry_seconds: float = 300.0
     market_feed_retry_seconds: float = 5.0
     market_feed_max_retry_seconds: float = 60.0
 

@@ -4,7 +4,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, time as dt_time, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from zoneinfo import ZoneInfo
 from uuid import uuid4
 
@@ -136,6 +136,7 @@ class StrategyEngine:
         self.opening_gap_locks: dict[str, OpeningGapLock] = {}
         self._entry_window_open_on_last_tick = False
         self._connection_error_log_state: dict[str, tuple[str, datetime]] = {}
+        self.last_reference_refresh_attempt_at: datetime | None = None
 
     def set_notifier(self, notifier: Callable[[StrategySnapshot], None]) -> None:
         self.notifier = notifier
@@ -271,6 +272,9 @@ class StrategyEngine:
             return self.get_snapshot()
 
     def refresh_reference_levels(self) -> StrategySnapshot:
+        with self.lock:
+            self.last_reference_refresh_attempt_at = self._now()
+
         try:
             previous_high, previous_low, candle_date = self.gateway.fetch_previous_day_levels()
             expiries = self.gateway.fetch_expiry_list()
@@ -284,6 +288,7 @@ class StrategyEngine:
         with self.lock:
             session_date = self._today_session_date()
             is_new_session = self.runtime.session_date != session_date
+            expected_source_date = self._expected_previous_trading_date(session_date)
             self.reference_levels.previous_day_high = previous_high
             self.reference_levels.previous_day_low = previous_low
             self.reference_levels.source_date = candle_date
@@ -307,6 +312,21 @@ class StrategyEngine:
                 f"Loaded previous day high {previous_high:.2f} and low {previous_low:.2f}.",
                 {"expiry_date": expiries[0], "source_date": candle_date},
             )
+            if candle_date < expected_source_date:
+                self._log(
+                    "warn",
+                    "Reference Levels Stale",
+                    (
+                        f"Dhan returned {candle_date} as the latest prior candle, "
+                        f"but {expected_source_date} is expected for session {session_date}. "
+                        "The engine will retry reference-level refresh."
+                    ),
+                    {
+                        "source_date": candle_date,
+                        "expected_source_date": expected_source_date,
+                        "session_date": session_date,
+                    },
+                )
             self._persist_and_emit()
             spot_price = self.runtime.spot_price
             enabled = self.config.enabled
@@ -1282,7 +1302,7 @@ class StrategyEngine:
                 with self.lock:
                     position = self.runtime.open_position
                     current_session = self.runtime.session_date
-                if current_session != self._today_session_date():
+                if self._reference_refresh_due(current_session):
                     self.refresh_reference_levels()
                     continue
                 if not position or position.status != "OPEN" or not self.gateway.is_configured:
@@ -1948,6 +1968,32 @@ class StrategyEngine:
 
     def _today_session_date(self) -> str:
         return datetime.now(ZoneInfo(self.settings.app_timezone)).date().isoformat()
+
+    @staticmethod
+    def _expected_previous_trading_date(session_date: str) -> str:
+        candidate = date.fromisoformat(session_date) - timedelta(days=1)
+        while candidate.weekday() >= 5:
+            candidate -= timedelta(days=1)
+        return candidate.isoformat()
+
+    def _reference_levels_stale_for_session(self, session_date: str) -> bool:
+        source_date = self.reference_levels.source_date
+        if not source_date:
+            return True
+        return source_date < self._expected_previous_trading_date(session_date)
+
+    def _reference_refresh_due(self, current_session: str | None = None) -> bool:
+        with self.lock:
+            session_date = self._today_session_date()
+            needs_refresh = current_session != session_date or self._reference_levels_stale_for_session(session_date)
+            if not needs_refresh:
+                return False
+            last_attempt = self.last_reference_refresh_attempt_at
+
+        if last_attempt is None:
+            return True
+        retry_seconds = max(self.settings.reference_level_retry_seconds, 1.0)
+        return (self._now() - last_attempt).total_seconds() >= retry_seconds
 
     def _trade_session_date(self, position: PositionState) -> str:
         opened_at = position.opened_at
