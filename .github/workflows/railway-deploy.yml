@@ -1,0 +1,35 @@
+name: Railway Deploy
+
+on:
+  workflow_dispatch:
+
+env:
+  VIRTUAL_TRADER_BASE_URL: "https://virtual-trader-backend-production.up.railway.app"
+  RAILWAY_PROJECT_ID: "9f3a8e80-186b-464d-b46b-2d069b382e0d"
+  RAILWAY_SERVICE: "virtual-trader-backend"
+  RAILWAY_ENVIRONMENT: "production"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Validate Railway token
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "${RAILWAY_TOKEN:-}" ]; then
+            echo "::error::Missing GitHub secret RAILWAY_TOKEN."
+            exit 1
+          fi
+
+      - name: Deploy backend
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: ./scripts/deploy_railway.sh
