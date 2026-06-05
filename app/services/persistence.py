@@ -6,6 +6,11 @@ from pathlib import Path
 
 from app.models.schemas import ActivityEvent, PositionState, StrategyConfig
 
+LEGACY_OI_MIN_EDGE_CHANGE = 500000.0
+LEGACY_OI_MIN_EDGE_PERCENT = 10.0
+DEFAULT_OI_MIN_EDGE_CHANGE = 650000.0
+DEFAULT_OI_MIN_EDGE_PERCENT = 12.0
+
 
 def migrate_trade_payload(trade: dict) -> dict:
     migrated = dict(trade)
@@ -59,6 +64,13 @@ def _infer_entry_oi_reference_price(trade: dict) -> float | None:
         return None
 
 
+def _float_or_none(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class RuntimeStateStore:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -96,8 +108,16 @@ class RuntimeStateStore:
         legacy_quantity = migrated.pop("quantity", None)
         migrated.setdefault("capital_sizing_enabled", True)
         migrated.setdefault("oi_confirmation_enabled", True)
-        migrated.setdefault("oi_confirmation_min_edge_change_oi", 500000.0)
-        migrated.setdefault("oi_confirmation_min_edge_percent", 10.0)
+        migrated.setdefault("oi_confirmation_min_edge_change_oi", DEFAULT_OI_MIN_EDGE_CHANGE)
+        migrated.setdefault("oi_confirmation_min_edge_percent", DEFAULT_OI_MIN_EDGE_PERCENT)
+        existing_oi_edge = _float_or_none(migrated.get("oi_confirmation_min_edge_change_oi"))
+        existing_oi_percent = _float_or_none(migrated.get("oi_confirmation_min_edge_percent"))
+        if (
+            existing_oi_edge == LEGACY_OI_MIN_EDGE_CHANGE
+            and existing_oi_percent == LEGACY_OI_MIN_EDGE_PERCENT
+        ):
+            migrated["oi_confirmation_min_edge_change_oi"] = DEFAULT_OI_MIN_EDGE_CHANGE
+            migrated["oi_confirmation_min_edge_percent"] = DEFAULT_OI_MIN_EDGE_PERCENT
         migrated.setdefault("gap_open_filter_enabled", True)
         migrated.setdefault("breakout_confirmation_ticks", 3)
         migrated.setdefault("breakout_confirmation_seconds", 30.0)

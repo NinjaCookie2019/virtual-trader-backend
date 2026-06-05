@@ -7,7 +7,7 @@ from pathlib import Path
 from app.models.schemas import ActivityEvent
 from app.core.config import Settings
 from app.services.dhan_gateway import DhanGatewayError, OptionContract, OptionOiSignal
-from app.services.persistence import migrate_trade_payload
+from app.services.persistence import RuntimeStateStore, migrate_trade_payload
 from app.services.strategy_engine import OpeningGapLock, StrategyEngine
 
 
@@ -39,6 +39,65 @@ def build_engine() -> StrategyEngine:
     engine.reference_levels.previous_day_low = 90.0
     engine.reference_levels.expiry_date = "2026-04-21"
     return engine
+
+
+def test_default_oi_thresholds_use_replay_supported_values() -> None:
+    engine = build_engine()
+
+    assert engine.config.oi_confirmation_min_edge_change_oi == 650000.0
+    assert engine.config.oi_confirmation_min_edge_percent == 12.0
+
+
+def test_runtime_config_migration_upgrades_legacy_oi_threshold_pair() -> None:
+    with TemporaryDirectory() as temp_dir:
+        state_path = Path(temp_dir) / "runtime_state.json"
+        state_path.write_text(
+            """
+            {
+              "config": {
+                "enabled": true,
+                "paper_trading": true,
+                "oi_confirmation_min_edge_change_oi": 500000.0,
+                "oi_confirmation_min_edge_percent": 10.0
+              },
+              "events": [],
+              "trade_history": []
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        config, _, _ = RuntimeStateStore(state_path).load()
+
+    assert config is not None
+    assert config.oi_confirmation_min_edge_change_oi == 650000.0
+    assert config.oi_confirmation_min_edge_percent == 12.0
+
+
+def test_runtime_config_migration_preserves_stronger_oi_thresholds() -> None:
+    with TemporaryDirectory() as temp_dir:
+        state_path = Path(temp_dir) / "runtime_state.json"
+        state_path.write_text(
+            """
+            {
+              "config": {
+                "enabled": true,
+                "paper_trading": true,
+                "oi_confirmation_min_edge_change_oi": 1000000.0,
+                "oi_confirmation_min_edge_percent": 20.0
+              },
+              "events": [],
+              "trade_history": []
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        config, _, _ = RuntimeStateStore(state_path).load()
+
+    assert config is not None
+    assert config.oi_confirmation_min_edge_change_oi == 1000000.0
+    assert config.oi_confirmation_min_edge_percent == 20.0
 
 
 def make_closed_trade(
@@ -823,10 +882,10 @@ def test_opening_gap_trade_confirms_oi_at_live_atm_not_old_breakout_level() -> N
             return OptionOiSignal(
                 option_type="PUT",
                 strike=23400,
-                ce_change_oi=2886195.0,
+                ce_change_oi=3000000.0,
                 pe_change_oi=-807950.0,
                 confirmed=True,
-                rule="post-gap fresh OI delta confirmed CE 544375.00, PE -11310.00",
+                rule="post-gap fresh OI delta confirmed CE 658180.00, PE -11310.00",
                 basis=strike_basis,
                 reference_price=reference_price,
             )
@@ -922,7 +981,7 @@ def test_normal_breakout_trade_confirms_oi_at_live_atm() -> None:
                 option_type="CALL",
                 strike=100,
                 ce_change_oi=1000000.0,
-                pe_change_oi=1600000.0,
+                pe_change_oi=1700000.0,
                 confirmed=True,
                 rule="PE change OI > CE change OI",
                 basis=strike_basis,
