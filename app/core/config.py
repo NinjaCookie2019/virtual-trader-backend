@@ -49,8 +49,10 @@ class Settings(BaseSettings):
     default_oi_confirmation_min_edge_change_oi: float = 650000.0
     default_oi_confirmation_min_edge_percent: float = 12.0
     default_gap_open_filter_enabled: bool = True
+    default_gap_open_trade_start_time: str = "09:25"
+    default_gap_open_max_extension_points: float = 75.0
     default_gap_open_continuation_points: float = 15.0
-    default_gap_open_option_premium_min_move_percent: float = 6.0
+    default_gap_open_option_premium_min_move_percent: float = 10.0
     default_daily_profit_lock_enabled: bool = True
     default_daily_profit_lock_amount: float = 1000.0
     default_stop_loss_percent: float = 15.0

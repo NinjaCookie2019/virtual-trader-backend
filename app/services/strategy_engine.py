@@ -76,6 +76,8 @@ class StrategyEngine:
             oi_confirmation_min_edge_change_oi=settings.default_oi_confirmation_min_edge_change_oi,
             oi_confirmation_min_edge_percent=settings.default_oi_confirmation_min_edge_percent,
             gap_open_filter_enabled=settings.default_gap_open_filter_enabled,
+            gap_open_trade_start_time=settings.default_gap_open_trade_start_time,
+            gap_open_max_extension_points=settings.default_gap_open_max_extension_points,
             gap_open_continuation_points=settings.default_gap_open_continuation_points,
             gap_open_option_premium_min_move_percent=settings.default_gap_open_option_premium_min_move_percent,
             daily_profit_lock_enabled=settings.default_daily_profit_lock_enabled,
@@ -515,6 +517,17 @@ class StrategyEngine:
         low_trigger = self._effective_entry_trigger("PUT", reference_low - breakout_buffer)
 
         if opening_gap_call_lock and spot_price > high_trigger and not previous_high_broken:
+            if not self._is_gap_trade_window_open():
+                self._log_opening_gap_wait(
+                    opening_gap_call_lock,
+                    spot_price,
+                    high_trigger,
+                    "Gap entry window has not opened yet.",
+                )
+                return
+            if not self._gap_extension_allowed("CALL", spot_price, high_trigger):
+                self._skip_opening_gap("CALL", spot_price, high_trigger)
+                return
             if self._opening_gap_price_continues(opening_gap_call_lock, spot_price):
                 if not self._daily_entry_allowed("CALL", spot_price, high_trigger):
                     return
@@ -541,6 +554,17 @@ class StrategyEngine:
             return
 
         if opening_gap_put_lock and spot_price < low_trigger and not previous_low_broken:
+            if not self._is_gap_trade_window_open():
+                self._log_opening_gap_wait(
+                    opening_gap_put_lock,
+                    spot_price,
+                    low_trigger,
+                    "Gap entry window has not opened yet.",
+                )
+                return
+            if not self._gap_extension_allowed("PUT", spot_price, low_trigger):
+                self._skip_opening_gap("PUT", spot_price, low_trigger)
+                return
             if self._opening_gap_price_continues(opening_gap_put_lock, spot_price):
                 if not self._daily_entry_allowed("PUT", spot_price, low_trigger):
                     return
@@ -647,6 +671,9 @@ class StrategyEngine:
 
         if spot_price > high_trigger and not previous_high_broken:
             if gap_open_filter_enabled:
+                if not self._gap_extension_allowed("CALL", spot_price, high_trigger):
+                    self._skip_opening_gap("CALL", spot_price, high_trigger)
+                    return
                 self._lock_opening_gap("CALL", spot_price, high_trigger)
                 return
             if not self._price_breakout_confirmed("CALL", spot_price, high_trigger):
@@ -658,6 +685,9 @@ class StrategyEngine:
 
         if spot_price < low_trigger and not previous_low_broken:
             if gap_open_filter_enabled:
+                if not self._gap_extension_allowed("PUT", spot_price, low_trigger):
+                    self._skip_opening_gap("PUT", spot_price, low_trigger)
+                    return
                 self._lock_opening_gap("PUT", spot_price, low_trigger)
                 return
             if not self._price_breakout_confirmed("PUT", spot_price, low_trigger):
@@ -854,6 +884,43 @@ class StrategyEngine:
                     "baseline_option_price": baseline_price,
                     "baseline_ce_change_oi": oi_signal.ce_change_oi if oi_signal else None,
                     "baseline_pe_change_oi": oi_signal.pe_change_oi if oi_signal else None,
+                },
+            )
+            self._persist_and_emit()
+
+    def _gap_extension_points(self, option_type: str, spot_price: float, trigger_price: float) -> float:
+        return spot_price - trigger_price if option_type == "CALL" else trigger_price - spot_price
+
+    def _gap_extension_allowed(self, option_type: str, spot_price: float, trigger_price: float) -> bool:
+        with self.lock:
+            max_extension = max(self.config.gap_open_max_extension_points, 0.0)
+        if max_extension <= 0:
+            return True
+        return self._gap_extension_points(option_type, spot_price, trigger_price) <= max_extension
+
+    def _skip_opening_gap(self, option_type: str, spot_price: float, trigger_price: float) -> None:
+        with self.lock:
+            max_extension = max(self.config.gap_open_max_extension_points, 0.0)
+            extension = self._gap_extension_points(option_type, spot_price, trigger_price)
+            self.opening_gap_locks.pop(option_type, None)
+            if option_type == "CALL":
+                self.runtime.previous_high_broken = True
+            else:
+                self.runtime.previous_low_broken = True
+            self._sync_opening_gap_runtime_flags()
+            self._log(
+                "warn",
+                "Opening Gap Skipped",
+                (
+                    f"{option_type} gap entry skipped because spot is {extension:.2f} "
+                    f"points beyond trigger, above max {max_extension:.2f}."
+                ),
+                {
+                    "option_type": option_type,
+                    "spot_price": spot_price,
+                    "trigger_price": trigger_price,
+                    "extension_points": extension,
+                    "max_extension_points": max_extension,
                 },
             )
             self._persist_and_emit()
@@ -2056,11 +2123,18 @@ class StrategyEngine:
         return dt_time(9, 15) <= current_time <= dt_time(15, 30)
 
     def _no_trade_before_time(self) -> dt_time:
+        return self._parse_config_time(self.config.no_trade_before_time, dt_time(9, 20))
+
+    def _gap_trade_start_time(self) -> dt_time:
+        return self._parse_config_time(self.config.gap_open_trade_start_time, dt_time(9, 25))
+
+    @staticmethod
+    def _parse_config_time(value: str, fallback: dt_time) -> dt_time:
         try:
-            hours, minutes = self.config.no_trade_before_time.split(":", maxsplit=1)
+            hours, minutes = value.split(":", maxsplit=1)
             return dt_time(int(hours), int(minutes))
-        except ValueError:
-            return dt_time(9, 20)
+        except (AttributeError, TypeError, ValueError):
+            return fallback
 
     def _is_trade_entry_window_open(self) -> bool:
         local_now = datetime.now(ZoneInfo(self.settings.app_timezone))
@@ -2068,6 +2142,13 @@ class StrategyEngine:
             return False
         current_time = local_now.time()
         return self._no_trade_before_time() <= current_time <= dt_time(15, 30)
+
+    def _is_gap_trade_window_open(self) -> bool:
+        local_now = self._now().astimezone(ZoneInfo(self.settings.app_timezone))
+        if local_now.weekday() >= 5:
+            return False
+        current_time = local_now.time()
+        return self._gap_trade_start_time() <= current_time <= dt_time(15, 30)
 
     def _next_trade_window_starts_at(self) -> datetime:
         timezone_info = ZoneInfo(self.settings.app_timezone)
@@ -2143,6 +2224,13 @@ class StrategyEngine:
         normalized.oi_confirmation_min_edge_percent = min(
             max(normalized.oi_confirmation_min_edge_percent, 0.0),
             100.0,
+        )
+        normalized.gap_open_trade_start_time = (
+            normalized.gap_open_trade_start_time or self.settings.default_gap_open_trade_start_time
+        )
+        normalized.gap_open_max_extension_points = min(
+            max(normalized.gap_open_max_extension_points, 0.0),
+            500.0,
         )
         normalized.gap_open_continuation_points = max(normalized.gap_open_continuation_points, 0.0)
         normalized.gap_open_option_premium_min_move_percent = min(

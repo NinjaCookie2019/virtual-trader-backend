@@ -46,6 +46,9 @@ def test_default_oi_thresholds_use_replay_supported_values() -> None:
 
     assert engine.config.oi_confirmation_min_edge_change_oi == 650000.0
     assert engine.config.oi_confirmation_min_edge_percent == 12.0
+    assert engine.config.gap_open_trade_start_time == "09:25"
+    assert engine.config.gap_open_max_extension_points == 75.0
+    assert engine.config.gap_open_option_premium_min_move_percent == 10.0
 
 
 def test_runtime_config_migration_upgrades_legacy_oi_threshold_pair() -> None:
@@ -98,6 +101,32 @@ def test_runtime_config_migration_preserves_stronger_oi_thresholds() -> None:
     assert config is not None
     assert config.oi_confirmation_min_edge_change_oi == 1000000.0
     assert config.oi_confirmation_min_edge_percent == 20.0
+
+
+def test_runtime_config_migration_upgrades_legacy_gap_premium_default() -> None:
+    with TemporaryDirectory() as temp_dir:
+        state_path = Path(temp_dir) / "runtime_state.json"
+        state_path.write_text(
+            """
+            {
+              "config": {
+                "enabled": true,
+                "paper_trading": true,
+                "gap_open_option_premium_min_move_percent": 6.0
+              },
+              "events": [],
+              "trade_history": []
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        config, _, _ = RuntimeStateStore(state_path).load()
+
+    assert config is not None
+    assert config.gap_open_trade_start_time == "09:25"
+    assert config.gap_open_max_extension_points == 75.0
+    assert config.gap_open_option_premium_min_move_percent == 10.0
 
 
 def make_closed_trade(
@@ -369,6 +398,7 @@ def test_gap_down_is_locked_when_entry_window_opens_and_requires_continuation() 
     engine.config.gap_open_continuation_points = 2.0
     engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
     engine._is_trade_entry_window_open = lambda: entry_window_open  # type: ignore[method-assign]
+    engine._is_gap_trade_window_open = lambda: True  # type: ignore[method-assign]
 
     engine.handle_market_tick({"LTP": 89.0})
     assert triggered == []
@@ -383,6 +413,45 @@ def test_gap_down_is_locked_when_entry_window_opens_and_requires_continuation() 
 
     engine.handle_market_tick({"LTP": 86.0})
     assert triggered == [("PUT", 86.0)]
+
+
+def test_opening_gap_waits_for_gap_trade_start_time() -> None:
+    engine = build_engine()
+    triggered: list[tuple[str, float]] = []
+    gap_window_open = False
+
+    engine.config.gap_open_continuation_points = 2.0
+    engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+    engine._is_gap_trade_window_open = lambda: gap_window_open  # type: ignore[method-assign]
+
+    engine._evaluate_breakout_from_state(88.0)
+    engine.runtime.spot_price = 88.0
+    engine._entry_window_open_on_last_tick = True
+    assert engine.runtime.opening_gap_put_locked is True
+
+    engine.handle_market_tick({"LTP": 86.0})
+    assert triggered == []
+    assert any(event.title == "Opening Gap Continuation Waiting" for event in engine.events)
+
+    gap_window_open = True
+    engine.handle_market_tick({"LTP": 86.0})
+    assert triggered == [("PUT", 86.0)]
+
+
+def test_opening_gap_skips_when_extension_is_too_far_from_trigger() -> None:
+    engine = build_engine()
+    triggered: list[tuple[str, float]] = []
+
+    engine.config.gap_open_max_extension_points = 75.0
+    engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+
+    engine._evaluate_breakout_from_state(10.0)
+
+    assert triggered == []
+    assert engine.runtime.opening_gap_put_locked is False
+    assert engine.runtime.previous_low_broken is True
+    assert engine.events[-1].title == "Opening Gap Skipped"
+    assert engine.events[-1].details["extension_points"] == 80.0
 
 
 def test_gap_up_lock_clears_after_spot_reclaims_trigger() -> None:
@@ -421,9 +490,9 @@ def test_opening_gap_premium_requires_strong_follow_through() -> None:
         top_ask_price=102.45,
     )
 
-    assert engine.config.gap_open_option_premium_min_move_percent == 6.0
-    assert engine._opening_gap_premium_confirms(lock, contract, 102.45) is False
-    assert engine._opening_gap_premium_confirms(lock, contract, 103.89) is True
+    assert engine.config.gap_open_option_premium_min_move_percent == 10.0
+    assert engine._opening_gap_premium_confirms(lock, contract, 107.79) is False
+    assert engine._opening_gap_premium_confirms(lock, contract, 107.81) is True
 
 
 def test_capital_sizing_takes_one_lot_when_trade_budget_is_too_small_but_equity_allows() -> None:
@@ -906,9 +975,9 @@ def test_opening_gap_trade_confirms_oi_at_live_atm_not_old_breakout_level() -> N
                 security_id="51347",
                 exchange_segment="NSE_FNO",
                 expiry_date=expiry_date,
-                last_price=116.75,
-                top_bid_price=116.50,
-                top_ask_price=116.75,
+                last_price=121.0,
+                top_bid_price=120.8,
+                top_ask_price=121.0,
             )
 
     fake_gateway = FakeGateway()

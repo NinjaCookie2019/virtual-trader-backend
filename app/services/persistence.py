@@ -10,6 +10,10 @@ LEGACY_OI_MIN_EDGE_CHANGE = 500000.0
 LEGACY_OI_MIN_EDGE_PERCENT = 10.0
 DEFAULT_OI_MIN_EDGE_CHANGE = 650000.0
 DEFAULT_OI_MIN_EDGE_PERCENT = 12.0
+LEGACY_GAP_PREMIUM_MIN_MOVE_PERCENT = 6.0
+DEFAULT_GAP_TRADE_START_TIME = "09:25"
+DEFAULT_GAP_MAX_EXTENSION_POINTS = 75.0
+DEFAULT_GAP_PREMIUM_MIN_MOVE_PERCENT = 10.0
 
 
 def migrate_trade_payload(trade: dict) -> dict:
@@ -119,11 +123,19 @@ class RuntimeStateStore:
             migrated["oi_confirmation_min_edge_change_oi"] = DEFAULT_OI_MIN_EDGE_CHANGE
             migrated["oi_confirmation_min_edge_percent"] = DEFAULT_OI_MIN_EDGE_PERCENT
         migrated.setdefault("gap_open_filter_enabled", True)
+        migrated.setdefault("gap_open_trade_start_time", DEFAULT_GAP_TRADE_START_TIME)
+        migrated.setdefault("gap_open_max_extension_points", DEFAULT_GAP_MAX_EXTENSION_POINTS)
         migrated.setdefault("breakout_confirmation_ticks", 3)
         migrated.setdefault("breakout_confirmation_seconds", 30.0)
         migrated.setdefault("second_trade_extra_buffer", 15.0)
         migrated.setdefault("gap_open_continuation_points", 15.0)
-        migrated.setdefault("gap_open_option_premium_min_move_percent", 6.0)
+        migrated.setdefault(
+            "gap_open_option_premium_min_move_percent",
+            DEFAULT_GAP_PREMIUM_MIN_MOVE_PERCENT,
+        )
+        existing_gap_premium = _float_or_none(migrated.get("gap_open_option_premium_min_move_percent"))
+        if existing_gap_premium == LEGACY_GAP_PREMIUM_MIN_MOVE_PERCENT:
+            migrated["gap_open_option_premium_min_move_percent"] = DEFAULT_GAP_PREMIUM_MIN_MOVE_PERCENT
         migrated.setdefault("daily_profit_lock_enabled", True)
         migrated.setdefault("daily_profit_lock_amount", 1000.0)
         migrated.setdefault("account_capital", 20000.0)

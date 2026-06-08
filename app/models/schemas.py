@@ -33,8 +33,10 @@ class StrategyConfig(BaseModel):
     oi_confirmation_min_edge_change_oi: float = 650000.0
     oi_confirmation_min_edge_percent: float = 12.0
     gap_open_filter_enabled: bool = True
+    gap_open_trade_start_time: str = "09:25"
+    gap_open_max_extension_points: float = 75.0
     gap_open_continuation_points: float = 15.0
-    gap_open_option_premium_min_move_percent: float = 6.0
+    gap_open_option_premium_min_move_percent: float = 10.0
     daily_profit_lock_enabled: bool = True
     daily_profit_lock_amount: float = 1000.0
     max_trades_per_day: int = 2
@@ -190,6 +192,8 @@ class ConfigUpdateRequest(BaseModel):
     oi_confirmation_min_edge_change_oi: float | None = None
     oi_confirmation_min_edge_percent: float | None = None
     gap_open_filter_enabled: bool | None = None
+    gap_open_trade_start_time: str | None = None
+    gap_open_max_extension_points: float | None = None
     gap_open_continuation_points: float | None = None
     gap_open_option_premium_min_move_percent: float | None = None
     daily_profit_lock_enabled: bool | None = None
