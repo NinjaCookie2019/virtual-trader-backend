@@ -11,6 +11,7 @@ LEGACY_OI_MIN_EDGE_PERCENT = 10.0
 DEFAULT_OI_MIN_EDGE_CHANGE = 650000.0
 DEFAULT_OI_MIN_EDGE_PERCENT = 12.0
 LEGACY_GAP_PREMIUM_MIN_MOVE_PERCENT = 6.0
+DEFAULT_GAP_LARGE_GAP_POINTS = 100.0
 DEFAULT_GAP_TRADE_START_TIME = "09:25"
 DEFAULT_GAP_MAX_EXTENSION_POINTS = 75.0
 DEFAULT_GAP_PREMIUM_MIN_MOVE_PERCENT = 10.0
@@ -123,6 +124,7 @@ class RuntimeStateStore:
             migrated["oi_confirmation_min_edge_change_oi"] = DEFAULT_OI_MIN_EDGE_CHANGE
             migrated["oi_confirmation_min_edge_percent"] = DEFAULT_OI_MIN_EDGE_PERCENT
         migrated.setdefault("gap_open_filter_enabled", True)
+        migrated.setdefault("gap_open_large_gap_points", DEFAULT_GAP_LARGE_GAP_POINTS)
         migrated.setdefault("gap_open_trade_start_time", DEFAULT_GAP_TRADE_START_TIME)
         migrated.setdefault("gap_open_max_extension_points", DEFAULT_GAP_MAX_EXTENSION_POINTS)
         migrated.setdefault("breakout_confirmation_ticks", 3)

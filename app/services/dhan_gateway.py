@@ -136,7 +136,7 @@ class DhanGateway:
         self.update_access_token(new_token)
         return new_token, token_valid_until, payload
 
-    def fetch_previous_day_levels(self) -> tuple[float, float, str]:
+    def fetch_previous_day_levels(self) -> tuple[float, float, float, str, float | None]:
         client = self._ensure_client()
         session_date = datetime.now(ZoneInfo(self.settings.app_timezone)).date()
         from_date = (session_date - timedelta(days=21)).isoformat()
@@ -150,22 +150,27 @@ class DhanGateway:
         )
         data = response.get("data") or {}
         timestamps = data.get("timestamp") or data.get("start_Time") or []
+        opens = data.get("open") or []
         highs = data.get("high") or []
         lows = data.get("low") or []
-        if not timestamps or not highs or not lows:
+        closes = data.get("close") or []
+        if not timestamps or not highs or not lows or not closes:
             raise DhanGatewayError(f"Historical data did not include usable candles: {response}")
 
-        candles: list[tuple[date, float, float]] = []
-        for timestamp, high, low in zip(timestamps, highs, lows):
+        candles: list[tuple[date, float, float, float]] = []
+        session_open: float | None = None
+        for index, (timestamp, high, low, close) in enumerate(zip(timestamps, highs, lows, closes)):
             candle_date = self._epoch_to_date(timestamp)
             if candle_date < session_date:
-                candles.append((candle_date, float(high), float(low)))
+                candles.append((candle_date, float(high), float(low), float(close)))
+            elif candle_date == session_date and index < len(opens):
+                session_open = float(opens[index])
 
         if not candles:
             raise DhanGatewayError(f"Historical data did not include a prior-session candle: {response}")
 
-        candle_date, high, low = candles[-1]
-        return high, low, candle_date.isoformat()
+        candle_date, high, low, close = candles[-1]
+        return high, low, close, candle_date.isoformat(), session_open
 
     def fetch_expiry_list(self) -> list[str]:
         client = self._ensure_client()

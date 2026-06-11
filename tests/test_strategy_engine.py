@@ -37,6 +37,7 @@ def build_engine() -> StrategyEngine:
     engine.config.second_trade_extra_buffer = 0.0
     engine.reference_levels.previous_day_high = 100.0
     engine.reference_levels.previous_day_low = 90.0
+    engine.reference_levels.previous_day_close = 95.0
     engine.reference_levels.expiry_date = "2026-04-21"
     return engine
 
@@ -46,6 +47,7 @@ def test_default_oi_thresholds_use_replay_supported_values() -> None:
 
     assert engine.config.oi_confirmation_min_edge_change_oi == 650000.0
     assert engine.config.oi_confirmation_min_edge_percent == 12.0
+    assert engine.config.gap_open_large_gap_points == 100.0
     assert engine.config.gap_open_trade_start_time == "09:25"
     assert engine.config.gap_open_max_extension_points == 75.0
     assert engine.config.gap_open_option_premium_min_move_percent == 10.0
@@ -224,7 +226,7 @@ def test_refresh_reference_levels_warns_when_dhan_returns_stale_source_date() ->
 
     class FakeGateway:
         def fetch_previous_day_levels(self):
-            return 23556.95, 23229.15, "2026-06-02"
+            return 23556.95, 23229.15, 23400.0, "2026-06-02", None
 
         def fetch_expiry_list(self):
             return ["2026-06-09"]
@@ -241,6 +243,24 @@ def test_refresh_reference_levels_warns_when_dhan_returns_stale_source_date() ->
         "expected_source_date": "2026-06-03",
         "session_date": "2026-06-04",
     }
+
+
+def test_refresh_reference_levels_uses_dhan_session_open_when_available() -> None:
+    engine = build_engine()
+
+    class FakeGateway:
+        def fetch_previous_day_levels(self):
+            return 23556.95, 23229.15, 23400.0, "2026-06-03", 23480.0
+
+        def fetch_expiry_list(self):
+            return ["2026-06-09"]
+
+    engine.gateway = FakeGateway()  # type: ignore[assignment]
+
+    engine.refresh_reference_levels()
+
+    assert engine.reference_levels.previous_day_close == 23400.0
+    assert engine.runtime.session_open_spot_price == 23480.0
 
 
 def test_price_breakout_confirmation_resets_when_spot_reclaims_trigger() -> None:
@@ -390,15 +410,14 @@ def test_breakout_does_not_trade_before_configured_entry_time() -> None:
     assert triggered == []
 
 
-def test_gap_down_is_locked_when_entry_window_opens_and_requires_continuation() -> None:
+def test_large_gap_down_waits_for_correction_before_breakout_retry() -> None:
     engine = build_engine()
     triggered: list[tuple[str, float]] = []
     entry_window_open = False
 
-    engine.config.gap_open_continuation_points = 2.0
+    engine.reference_levels.previous_day_close = 200.0
     engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
     engine._is_trade_entry_window_open = lambda: entry_window_open  # type: ignore[method-assign]
-    engine._is_gap_trade_window_open = lambda: True  # type: ignore[method-assign]
 
     engine.handle_market_tick({"LTP": 89.0})
     assert triggered == []
@@ -408,21 +427,23 @@ def test_gap_down_is_locked_when_entry_window_opens_and_requires_continuation() 
     assert triggered == []
     assert engine.runtime.opening_gap_put_locked is True
 
-    engine.handle_market_tick({"LTP": 87.0})
+    engine.handle_market_tick({"LTP": 86.0})
     assert triggered == []
 
-    engine.handle_market_tick({"LTP": 86.0})
-    assert triggered == [("PUT", 86.0)]
+    engine.handle_market_tick({"LTP": 90.0})
+    assert engine.runtime.opening_gap_put_locked is False
+
+    engine.handle_market_tick({"LTP": 89.0})
+    assert triggered == [("PUT", 89.0)]
 
 
-def test_opening_gap_waits_for_gap_trade_start_time() -> None:
+def test_large_gap_lock_does_not_trade_continuation() -> None:
     engine = build_engine()
     triggered: list[tuple[str, float]] = []
-    gap_window_open = False
 
-    engine.config.gap_open_continuation_points = 2.0
+    engine.reference_levels.previous_day_close = 200.0
+    engine.runtime.session_open_spot_price = 88.0
     engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
-    engine._is_gap_trade_window_open = lambda: gap_window_open  # type: ignore[method-assign]
 
     engine._evaluate_breakout_from_state(88.0)
     engine.runtime.spot_price = 88.0
@@ -431,32 +452,29 @@ def test_opening_gap_waits_for_gap_trade_start_time() -> None:
 
     engine.handle_market_tick({"LTP": 86.0})
     assert triggered == []
-    assert any(event.title == "Opening Gap Continuation Waiting" for event in engine.events)
-
-    gap_window_open = True
-    engine.handle_market_tick({"LTP": 86.0})
-    assert triggered == [("PUT", 86.0)]
+    assert engine.runtime.opening_gap_put_locked is True
+    assert any(event.title == "Opening Gap Correction Waiting" for event in engine.events)
 
 
-def test_opening_gap_skips_when_extension_is_too_far_from_trigger() -> None:
+def test_small_gap_down_does_not_lock_opening_gap() -> None:
     engine = build_engine()
     triggered: list[tuple[str, float]] = []
 
-    engine.config.gap_open_max_extension_points = 75.0
+    engine.reference_levels.previous_day_close = 100.0
+    engine.runtime.session_open_spot_price = 88.0
     engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
 
-    engine._evaluate_breakout_from_state(10.0)
+    engine._evaluate_breakout_from_state(88.0)
 
-    assert triggered == []
+    assert triggered == [("PUT", 88.0)]
     assert engine.runtime.opening_gap_put_locked is False
-    assert engine.runtime.previous_low_broken is True
-    assert engine.events[-1].title == "Opening Gap Skipped"
-    assert engine.events[-1].details["extension_points"] == 80.0
 
 
 def test_gap_up_lock_clears_after_spot_reclaims_trigger() -> None:
     engine = build_engine()
     triggered: list[tuple[str, float]] = []
+    engine.reference_levels.previous_day_close = 0.0
+    engine.runtime.session_open_spot_price = 102.0
     engine._trigger_trade = lambda option_type, spot_price, *_: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
 
     engine._evaluate_breakout_from_state(102.0)
@@ -643,7 +661,11 @@ def test_profitable_trade_below_lock_can_retry_when_daily_cap_allows() -> None:
     engine.runtime.previous_high_broken = False
 
     triggered: list[tuple[str, float]] = []
-    engine._trigger_trade = lambda option_type, spot_price: triggered.append((option_type, spot_price))  # type: ignore[method-assign]
+    def trigger_trade(option_type: str, spot_price: float) -> None:
+        triggered.append((option_type, spot_price))
+        engine.runtime.previous_high_broken = True
+
+    engine._trigger_trade = trigger_trade  # type: ignore[method-assign]
     engine._evaluate_breakout(previous_spot=99.0, spot_price=101.0)
     engine._evaluate_breakout_from_state(101.0)
 

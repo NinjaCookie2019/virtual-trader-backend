@@ -33,6 +33,7 @@ class StrategyConfig(BaseModel):
     oi_confirmation_min_edge_change_oi: float = 650000.0
     oi_confirmation_min_edge_percent: float = 12.0
     gap_open_filter_enabled: bool = True
+    gap_open_large_gap_points: float = 100.0
     gap_open_trade_start_time: str = "09:25"
     gap_open_max_extension_points: float = 75.0
     gap_open_continuation_points: float = 15.0
@@ -73,6 +74,7 @@ class ConnectionState(BaseModel):
 class ReferenceLevels(BaseModel):
     previous_day_high: float | None = None
     previous_day_low: float | None = None
+    previous_day_close: float | None = None
     source_date: str | None = None
     expiry_date: str | None = None
     updated_at: datetime | None = None
@@ -160,6 +162,7 @@ class StrategyRuntime(BaseModel):
     opening_gap_call_locked: bool = False
     opening_gap_put_locked: bool = False
     session_date: str | None = None
+    session_open_spot_price: float | None = None
     market_session_open: bool = False
     next_trade_window_starts_at: datetime | None = None
 
@@ -192,6 +195,7 @@ class ConfigUpdateRequest(BaseModel):
     oi_confirmation_min_edge_change_oi: float | None = None
     oi_confirmation_min_edge_percent: float | None = None
     gap_open_filter_enabled: bool | None = None
+    gap_open_large_gap_points: float | None = None
     gap_open_trade_start_time: str | None = None
     gap_open_max_extension_points: float | None = None
     gap_open_continuation_points: float | None = None

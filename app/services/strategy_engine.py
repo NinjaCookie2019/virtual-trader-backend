@@ -76,6 +76,7 @@ class StrategyEngine:
             oi_confirmation_min_edge_change_oi=settings.default_oi_confirmation_min_edge_change_oi,
             oi_confirmation_min_edge_percent=settings.default_oi_confirmation_min_edge_percent,
             gap_open_filter_enabled=settings.default_gap_open_filter_enabled,
+            gap_open_large_gap_points=settings.default_gap_open_large_gap_points,
             gap_open_trade_start_time=settings.default_gap_open_trade_start_time,
             gap_open_max_extension_points=settings.default_gap_open_max_extension_points,
             gap_open_continuation_points=settings.default_gap_open_continuation_points,
@@ -278,7 +279,9 @@ class StrategyEngine:
             self.last_reference_refresh_attempt_at = self._now()
 
         try:
-            previous_high, previous_low, candle_date = self.gateway.fetch_previous_day_levels()
+            previous_high, previous_low, previous_close, candle_date, session_open = (
+                self.gateway.fetch_previous_day_levels()
+            )
             expiries = self.gateway.fetch_expiry_list()
         except DhanGatewayError as exc:
             with self.lock:
@@ -293,6 +296,7 @@ class StrategyEngine:
             expected_source_date = self._expected_previous_trading_date(session_date)
             self.reference_levels.previous_day_high = previous_high
             self.reference_levels.previous_day_low = previous_low
+            self.reference_levels.previous_day_close = previous_close
             self.reference_levels.source_date = candle_date
             self.reference_levels.expiry_date = expiries[0]
             self.reference_levels.updated_at = self._now()
@@ -305,14 +309,25 @@ class StrategyEngine:
                 self.runtime.trades_today = 0
                 self.runtime.last_signal = None
                 self.runtime.last_signal_at = None
+                self.runtime.session_open_spot_price = session_open
                 self.runtime.session_date = session_date
             else:
                 self._hydrate_session_state_from_history(session_date)
+                if session_open is not None:
+                    self.runtime.session_open_spot_price = session_open
             self._log(
                 "info",
                 "Reference Levels Updated",
-                f"Loaded previous day high {previous_high:.2f} and low {previous_low:.2f}.",
-                {"expiry_date": expiries[0], "source_date": candle_date},
+                (
+                    f"Loaded previous day high {previous_high:.2f}, "
+                    f"low {previous_low:.2f}, and close {previous_close:.2f}."
+                ),
+                {
+                    "expiry_date": expiries[0],
+                    "source_date": candle_date,
+                    "previous_day_close": previous_close,
+                    "session_open_spot_price": session_open,
+                },
             )
             if candle_date < expected_source_date:
                 self._log(
@@ -439,6 +454,8 @@ class StrategyEngine:
             self.runtime.previous_spot_price = previous_spot
             self.runtime.spot_price = ltp
             self.runtime.spot_updated_at = self._now()
+            if self.runtime.session_open_spot_price is None and self._is_market_session_open():
+                self.runtime.session_open_spot_price = ltp
 
         self._emit()
         self._rearm_breakout_flags(ltp)
@@ -517,21 +534,12 @@ class StrategyEngine:
         low_trigger = self._effective_entry_trigger("PUT", reference_low - breakout_buffer)
 
         if opening_gap_call_lock and spot_price > high_trigger and not previous_high_broken:
-            if not self._is_gap_trade_window_open():
-                self._log_opening_gap_wait(
-                    opening_gap_call_lock,
-                    spot_price,
-                    high_trigger,
-                    "Gap entry window has not opened yet.",
-                )
-                return
-            if not self._gap_extension_allowed("CALL", spot_price, high_trigger):
-                self._skip_opening_gap("CALL", spot_price, high_trigger)
-                return
-            if self._opening_gap_price_continues(opening_gap_call_lock, spot_price):
-                if not self._daily_entry_allowed("CALL", spot_price, high_trigger):
-                    return
-                self._trigger_trade("CALL", spot_price, opening_gap_call_lock)
+            self._log_opening_gap_wait(
+                opening_gap_call_lock,
+                spot_price,
+                high_trigger,
+                "Large gap-up is locked until price corrects back to the breakout trigger.",
+            )
             return
 
         if previous_spot <= high_trigger < spot_price and not previous_high_broken:
@@ -554,21 +562,12 @@ class StrategyEngine:
             return
 
         if opening_gap_put_lock and spot_price < low_trigger and not previous_low_broken:
-            if not self._is_gap_trade_window_open():
-                self._log_opening_gap_wait(
-                    opening_gap_put_lock,
-                    spot_price,
-                    low_trigger,
-                    "Gap entry window has not opened yet.",
-                )
-                return
-            if not self._gap_extension_allowed("PUT", spot_price, low_trigger):
-                self._skip_opening_gap("PUT", spot_price, low_trigger)
-                return
-            if self._opening_gap_price_continues(opening_gap_put_lock, spot_price):
-                if not self._daily_entry_allowed("PUT", spot_price, low_trigger):
-                    return
-                self._trigger_trade("PUT", spot_price, opening_gap_put_lock)
+            self._log_opening_gap_wait(
+                opening_gap_put_lock,
+                spot_price,
+                low_trigger,
+                "Large gap-down is locked until price corrects back to the breakout trigger.",
+            )
             return
 
         if previous_spot >= low_trigger > spot_price and not previous_low_broken:
@@ -670,10 +669,7 @@ class StrategyEngine:
         low_trigger = self._effective_entry_trigger("PUT", reference_low - breakout_buffer)
 
         if spot_price > high_trigger and not previous_high_broken:
-            if gap_open_filter_enabled:
-                if not self._gap_extension_allowed("CALL", spot_price, high_trigger):
-                    self._skip_opening_gap("CALL", spot_price, high_trigger)
-                    return
+            if gap_open_filter_enabled and self._large_gap_open_direction() == "CALL":
                 self._lock_opening_gap("CALL", spot_price, high_trigger)
                 return
             if not self._price_breakout_confirmed("CALL", spot_price, high_trigger):
@@ -684,10 +680,7 @@ class StrategyEngine:
             return
 
         if spot_price < low_trigger and not previous_low_broken:
-            if gap_open_filter_enabled:
-                if not self._gap_extension_allowed("PUT", spot_price, low_trigger):
-                    self._skip_opening_gap("PUT", spot_price, low_trigger)
-                    return
+            if gap_open_filter_enabled and self._large_gap_open_direction() == "PUT":
                 self._lock_opening_gap("PUT", spot_price, low_trigger)
                 return
             if not self._price_breakout_confirmed("PUT", spot_price, low_trigger):
@@ -806,9 +799,6 @@ class StrategyEngine:
         with self.lock:
             if option_type in self.opening_gap_locks:
                 return
-            expiry_date = self.reference_levels.expiry_date
-            strike_step = self.config.strike_step
-            oi_confirmation_enabled = self.config.oi_confirmation_enabled
             lock = OpeningGapLock(
                 option_type=option_type,
                 trigger_price=trigger_price,
@@ -817,76 +807,46 @@ class StrategyEngine:
             )
             self.opening_gap_locks[option_type] = lock
             self._sync_opening_gap_runtime_flags()
-
-        if not expiry_date:
-            with self.lock:
-                self._log("warn", "Opening Gap Locked", "Gap entry blocked, but expiry date is not loaded yet.")
-                self._persist_and_emit()
-            return
-
-        try:
-            chain, expiry_date = self._fetch_option_chain_with_expiry_refresh(expiry_date)
-            oi_signal = self.gateway.evaluate_oi_confirmation(
-                chain=chain,
-                option_type=option_type,
-                reference_price=spot_price,
-                strike_step=strike_step,
-                strike_basis="atm",
-            ) if oi_confirmation_enabled else None
-            oi_signal = self._apply_oi_edge_filter(oi_signal)
-            contract = self.gateway.resolve_contract_from_chain(
-                chain=chain,
-                spot_price=spot_price,
-                option_type=option_type,
-                strike_step=strike_step,
-                expiry_date=expiry_date,
-            )
-            baseline_price = self._entry_fill_price(contract)
-        except DhanGatewayError as exc:
-            with self.lock:
-                self.connections.last_error = str(exc)
-                self._log(
-                    "warn",
-                    "Opening Gap Locked",
-                    (
-                        f"{option_type} gap entry blocked at {spot_price:.2f}; "
-                        "baseline option/OI data could not be captured."
-                    ),
-                    {
-                        "option_type": option_type,
-                        "spot_price": spot_price,
-                        "trigger_price": trigger_price,
-                        "error": str(exc),
-                    },
-                )
-                self._persist_and_emit()
-            return
-
-        with self.lock:
-            current_lock = self.opening_gap_locks.get(option_type)
-            if not current_lock or current_lock.baseline_spot_price != spot_price:
-                return
-            current_lock.baseline_oi_signal = oi_signal
-            current_lock.baseline_option_strike = contract.strike
-            current_lock.baseline_option_price = baseline_price
+            gap_points = self._large_gap_open_points(option_type)
             self._log(
                 "warn",
                 "Opening Gap Locked",
                 (
                     f"{option_type} gap entry blocked at {spot_price:.2f}. "
-                    "Waiting for fresh price continuation, post-gap OI, and option premium confirmation."
+                    "Waiting for correction back to the breakout trigger before allowing a fresh entry."
                 ),
                 {
                     "option_type": option_type,
                     "spot_price": spot_price,
                     "trigger_price": trigger_price,
-                    "baseline_option_strike": contract.strike,
-                    "baseline_option_price": baseline_price,
-                    "baseline_ce_change_oi": oi_signal.ce_change_oi if oi_signal else None,
-                    "baseline_pe_change_oi": oi_signal.pe_change_oi if oi_signal else None,
+                    "session_open_spot_price": self.runtime.session_open_spot_price,
+                    "previous_day_close": self.reference_levels.previous_day_close,
+                    "gap_points": gap_points,
+                    "large_gap_threshold_points": self.config.gap_open_large_gap_points,
                 },
             )
             self._persist_and_emit()
+
+    def _large_gap_open_direction(self) -> str | None:
+        call_gap = self._large_gap_open_points("CALL")
+        put_gap = self._large_gap_open_points("PUT")
+        with self.lock:
+            threshold = max(self.config.gap_open_large_gap_points, 0.0)
+        if threshold <= 0:
+            return None
+        if call_gap is not None and call_gap >= threshold:
+            return "CALL"
+        if put_gap is not None and put_gap >= threshold:
+            return "PUT"
+        return None
+
+    def _large_gap_open_points(self, option_type: str) -> float | None:
+        with self.lock:
+            open_price = self.runtime.session_open_spot_price
+            previous_close = self.reference_levels.previous_day_close
+        if open_price is None or previous_close is None:
+            return None
+        return open_price - previous_close if option_type == "CALL" else previous_close - open_price
 
     def _gap_extension_points(self, option_type: str, spot_price: float, trigger_price: float) -> float:
         return spot_price - trigger_price if option_type == "CALL" else trigger_price - spot_price
@@ -1050,7 +1010,7 @@ class StrategyEngine:
             lock.last_wait_log_at = now
             self._log(
                 "warn",
-                "Opening Gap Continuation Waiting",
+                "Opening Gap Correction Waiting",
                 reason,
                 {
                     "option_type": lock.option_type,
@@ -2227,6 +2187,10 @@ class StrategyEngine:
         )
         normalized.gap_open_trade_start_time = (
             normalized.gap_open_trade_start_time or self.settings.default_gap_open_trade_start_time
+        )
+        normalized.gap_open_large_gap_points = min(
+            max(normalized.gap_open_large_gap_points, 0.0),
+            500.0,
         )
         normalized.gap_open_max_extension_points = min(
             max(normalized.gap_open_max_extension_points, 0.0),
