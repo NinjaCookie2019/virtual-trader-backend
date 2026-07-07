@@ -263,6 +263,46 @@ def test_refresh_reference_levels_uses_dhan_session_open_when_available() -> Non
     assert engine.runtime.session_open_spot_price == 23480.0
 
 
+def test_select_trade_expiry_keeps_nearest_before_expiry_day() -> None:
+    engine = build_engine()
+    engine._today_session_date = lambda: "2026-07-06"  # type: ignore[method-assign]
+
+    selected = engine._select_trade_expiry(["2026-07-07", "2026-07-14"])
+
+    assert selected == "2026-07-07"
+
+
+def test_select_trade_expiry_skips_same_day_expiry_when_next_is_available() -> None:
+    engine = build_engine()
+    engine._today_session_date = lambda: "2026-07-07"  # type: ignore[method-assign]
+
+    selected = engine._select_trade_expiry(["2026-07-07", "2026-07-14"])
+
+    assert selected == "2026-07-14"
+
+
+def test_refresh_reference_levels_uses_next_week_expiry_on_expiry_day() -> None:
+    engine = build_engine()
+    engine._today_session_date = lambda: "2026-07-07"  # type: ignore[method-assign]
+
+    class FakeGateway:
+        def fetch_previous_day_levels(self):
+            return 24458.65, 24287.1, 24430.35, "2026-07-06", 24480.0
+
+        def fetch_expiry_list(self):
+            return ["2026-07-07", "2026-07-14"]
+
+    engine.gateway = FakeGateway()  # type: ignore[assignment]
+
+    engine.refresh_reference_levels()
+
+    assert engine.reference_levels.expiry_date == "2026-07-14"
+    updated_events = [event for event in engine.events if event.title == "Reference Levels Updated"]
+    assert updated_events
+    assert updated_events[-1].details["nearest_expiry_date"] == "2026-07-07"
+    assert updated_events[-1].details["same_day_expiry_skipped"] is True
+
+
 def test_price_breakout_confirmation_resets_when_spot_reclaims_trigger() -> None:
     engine = build_engine()
     engine.config.breakout_confirmation_ticks = 2

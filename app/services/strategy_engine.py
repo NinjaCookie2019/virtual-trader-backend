@@ -192,7 +192,7 @@ class StrategyEngine:
         with self.lock:
             expiry_date = self.reference_levels.expiry_date
         if not expiry_date:
-            expiry_date = self.gateway.fetch_expiry_list()[0]
+            expiry_date = self._select_trade_expiry(self.gateway.fetch_expiry_list())
 
         chain, expiry_date = self._fetch_option_chain_with_expiry_refresh(expiry_date)
         updated_at = self._now()
@@ -221,7 +221,7 @@ class StrategyEngine:
             if not self._is_invalid_expiry_error(exc):
                 raise
 
-            refreshed_expiry = self.gateway.fetch_expiry_list()[0]
+            refreshed_expiry = self._select_trade_expiry(self.gateway.fetch_expiry_list())
             with self.lock:
                 self.reference_levels.expiry_date = refreshed_expiry
                 self.reference_levels.updated_at = self._now()
@@ -283,6 +283,7 @@ class StrategyEngine:
                 self.gateway.fetch_previous_day_levels()
             )
             expiries = self.gateway.fetch_expiry_list()
+            selected_expiry = self._select_trade_expiry(expiries)
         except DhanGatewayError as exc:
             with self.lock:
                 self.connections.last_error = str(exc)
@@ -298,7 +299,7 @@ class StrategyEngine:
             self.reference_levels.previous_day_low = previous_low
             self.reference_levels.previous_day_close = previous_close
             self.reference_levels.source_date = candle_date
-            self.reference_levels.expiry_date = expiries[0]
+            self.reference_levels.expiry_date = selected_expiry
             self.reference_levels.updated_at = self._now()
             self.connections.last_error = None
             if is_new_session:
@@ -323,7 +324,9 @@ class StrategyEngine:
                     f"low {previous_low:.2f}, and close {previous_close:.2f}."
                 ),
                 {
-                    "expiry_date": expiries[0],
+                    "expiry_date": selected_expiry,
+                    "nearest_expiry_date": expiries[0] if expiries else None,
+                    "same_day_expiry_skipped": bool(expiries and selected_expiry != expiries[0]),
                     "source_date": candle_date,
                     "previous_day_close": previous_close,
                     "session_open_spot_price": session_open,
@@ -437,6 +440,25 @@ class StrategyEngine:
             self._hydrate_session_state_from_history(session_date)
             self._persist_and_emit()
             return self.get_snapshot()
+
+    def _select_trade_expiry(self, expiries: list[str]) -> str:
+        if not expiries:
+            raise DhanGatewayError(f"No expiries returned for {self.settings.underlying_name}.")
+        today = date.fromisoformat(self._today_session_date())
+        parsed: list[tuple[date, str]] = []
+        for expiry in expiries:
+            try:
+                parsed.append((date.fromisoformat(expiry), expiry))
+            except ValueError:
+                continue
+        if not parsed:
+            return expiries[0]
+
+        parsed.sort(key=lambda item: item[0])
+        for expiry_date, expiry in parsed:
+            if expiry_date > today:
+                return expiry
+        return parsed[-1][1]
 
     def handle_market_tick(self, packet: dict[str, object]) -> None:
         ltp = self._extract_spot_ltp(packet)
